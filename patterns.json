@@ -1,0 +1,112 @@
+{
+  "xss_patterns": {
+    "innerHTML_assignment": {
+      "pattern": "\\.innerHTML\\s*=\\s*[^;]+",
+      "severity": "HIGH",
+      "description": "Direct innerHTML assignment can lead to DOM-based XSS"
+    },
+    "document_write": {
+      "pattern": "document\\.write\\s*\\([^)]*\\)",
+      "severity": "HIGH",
+      "description": "document.write() can introduce XSS vulnerabilities"
+    },
+    "eval_usage": {
+      "pattern": "\\beval\\s*\\([^)]*\\)",
+      "severity": "CRITICAL",
+      "description": "eval() execution of dynamic content is dangerous"
+    },
+    "innerhtml_url_param": {
+      "pattern": "\\.innerHTML\\s*=.*(?:location|URL|search|hash|referrer)",
+      "severity": "CRITICAL",
+      "description": "innerHTML with URL parameters - direct XSS vector"
+    },
+    "outerhtml_assignment": {
+      "pattern": "\\.outerHTML\\s*=\\s*[^;]+",
+      "severity": "HIGH",
+      "description": "outerHTML assignment can lead to XSS"
+    },
+    "script_src_dynamic": {
+      "pattern": "<script[^>]*src\\s*=\\s*[\"'][^\"']*[\\$\\{\\}][^\"']*[\"']",
+      "severity": "HIGH",
+      "description": "Dynamic script source injection"
+    },
+    "event_handler_injection": {
+      "pattern": "on\\w+\\s*=\\s*[\"'][^\"']*(?:\\+|concat|`)",
+      "severity": "MEDIUM",
+      "description": "Event handler with string concatenation"
+    },
+    "jquery_html": {
+      "pattern": "\\$\\([^)]*\\)\\.html\\s*\\([^)]*\\)",
+      "severity": "MEDIUM",
+      "description": "jQuery .html() method can introduce XSS"
+    },
+    "jquery_append": {
+      "pattern": "\\$\\([^)]*\\)\\.(append|prepend|after|before)\\s*\\([^)]*[+`]",
+      "severity": "MEDIUM",
+      "description": "jQuery DOM manipulation with dynamic content"
+    },
+    "location_href_write": {
+      "pattern": "location\\s*(?:\\.href)?\\s*=\\s*[^;]*(?:document|window|location)",
+      "severity": "MEDIUM",
+      "description": "Location manipulation with dynamic content"
+    },
+    "reflected_param_usage": {
+      "pattern": "(?:URLSearchParams|location\\.search|location\\.hash)[^;]*(?:innerHTML|document\\.write)",
+      "severity": "CRITICAL",
+      "description": "URL parameter directly used in DOM manipulation"
+    },
+    "template_literal_html": {
+      "pattern": "`[^`]*<[^`]*\\$\\{[^}]+\\}[^`]*>`",
+      "severity": "MEDIUM",
+      "description": "Template literal with HTML and variable interpolation"
+    },
+    "unsanitized_input": {
+      "pattern": "(?:getElementById|querySelector|getElementsBy)\\([^)]*\\)\\.(?:value|textContent)[^;]*(?:innerHTML|document\\.write)",
+      "severity": "HIGH",
+      "description": "User input directly used in DOM without sanitization"
+    }
+  },
+  "csrf_patterns": {
+    "form_no_csrf_token": {
+      "pattern": "<form[^>]*method\\s*=\\s*[\"']?post[\"']?[^>]*>(?:(?!csrf|token|_token|authenticity).)*?</form>",
+      "severity": "HIGH",
+      "description": "POST form without CSRF token",
+      "flags": ["IGNORECASE", "DOTALL"]
+    },
+    "ajax_no_csrf": {
+      "pattern": "(?:fetch|XMLHttpRequest|axios|\\$\\.(?:ajax|post|get))\\s*\\([^)]*(?:POST|PUT|DELETE)[^)]*\\)(?:(?!csrf|token|X-CSRF).)*",
+      "severity": "MEDIUM",
+      "description": "AJAX request without CSRF protection"
+    },
+    "form_action_external": {
+      "pattern": "<form[^>]*action\\s*=\\s*[\"']https?://[^\"']+[\"'][^>]*>",
+      "severity": "MEDIUM",
+      "description": "Form submitting to external URL"
+    },
+    "state_change_get": {
+      "pattern": "<a[^>]*href\\s*=\\s*[\"'][^\"']*(?:delete|remove|update|edit|modify|change)[^\"']*[\"'][^>]*>",
+      "severity": "MEDIUM",
+      "description": "State-changing action via GET request"
+    },
+    "auto_submit_form": {
+      "pattern": "(?:onload|setTimeout|setInterval)[^;]*\\.submit\\s*\\(\\)",
+      "severity": "HIGH",
+      "description": "Auto-submitting form detected"
+    },
+    "missing_samesite": {
+      "pattern": "document\\.cookie\\s*=\\s*[^;]*(?!SameSite)",
+      "severity": "LOW",
+      "description": "Cookie set without SameSite attribute"
+    },
+    "cors_wildcard": {
+      "pattern": "Access-Control-Allow-Origin[\"']?\\s*:\\s*[\"']?\\*",
+      "severity": "MEDIUM",
+      "description": "CORS with wildcard origin"
+    },
+    "form_target_blank": {
+      "pattern": "<form[^>]*target\\s*=\\s*[\"']_blank[\"'][^>]*>",
+      "severity": "LOW",
+      "description": "Form with target=\"_blank\" may be vulnerable to tabnabbing"
+    }
+  }
+}

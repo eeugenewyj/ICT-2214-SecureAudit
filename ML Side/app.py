@@ -20,6 +20,7 @@ from PHP_Patterns import (
     SQL_PATTERNS, SSRF_PATTERNS, AUTH_BYPASS_PATTERNS,
     INPUT_VALIDATION_PATTERNS, SAFE_PATTERNS
 )
+from PHP_Recommendations import generate_recommendations
 
 app = Flask(__name__)
 
@@ -73,27 +74,27 @@ class PHPFeatureExtractor:
         features = []
 
         # SQL Injection features
-        for pattern_name, pattern in self.SQL_PATTERNS.items():
+        for pattern_name, (pattern, weight) in self.SQL_PATTERNS.items():
             count = len(re.findall(pattern, code, re.IGNORECASE))
             features.append(count)
 
         # SSRF features
-        for pattern_name, pattern in self.SSRF_PATTERNS.items():
+        for pattern_name, (pattern, weight) in self.SSRF_PATTERNS.items():
             count = len(re.findall(pattern, code, re.IGNORECASE))
             features.append(count)
 
         # Authentication Bypass features
-        for pattern_name, pattern in self.AUTH_BYPASS_PATTERNS.items():
+        for pattern_name, (pattern, weight) in self.AUTH_BYPASS_PATTERNS.items():
             count = len(re.findall(pattern, code, re.IGNORECASE))
             features.append(count)
 
         # Input Validation features
-        for pattern_name, pattern in self.INPUT_VALIDATION_PATTERNS.items():
+        for pattern_name, (pattern, weight) in self.INPUT_VALIDATION_PATTERNS.items():
             count = len(re.findall(pattern, code, re.IGNORECASE))
             features.append(count)
 
         # Safe pattern features
-        for pattern_name, pattern in self.SAFE_PATTERNS.items():
+        for pattern_name, (pattern, weight) in self.SAFE_PATTERNS.items():
             count = len(re.findall(pattern, code, re.IGNORECASE))
             features.append(count)
 
@@ -119,70 +120,70 @@ class RuleBasedClassifier:
         self.extractor = PHPFeatureExtractor()
 
     def classify(self, code):
-        """Classify code using pattern matching rules."""
+        """Classify code using weighted pattern matching rules.
+
+        Each pattern has an associated severity weight that reflects its
+        real-world impact. The highest weight among matched patterns
+        determines the base confidence score for that vulnerability type.
+        Additional matches add smaller increments.
+        """
         results = {
-            'sql_injection': {'score': 0, 'confidence': 0, 'indicators': []},
-            'ssrf': {'score': 0, 'confidence': 0, 'indicators': []},
-            'authentication_bypass': {'score': 0, 'confidence': 0, 'indicators': []},
-            'input_validation': {'score': 0, 'confidence': 0, 'indicators': []}
+            'sql_injection': {'score': 0, 'confidence': 0, 'indicators': [], 'severity': 'NONE'},
+            'ssrf': {'score': 0, 'confidence': 0, 'indicators': [], 'severity': 'NONE'},
+            'authentication_bypass': {'score': 0, 'confidence': 0, 'indicators': [], 'severity': 'NONE'},
+            'input_validation': {'score': 0, 'confidence': 0, 'indicators': [], 'severity': 'NONE'}
         }
 
-        # Check SQL Injection patterns
-        for pattern_name, pattern in self.extractor.SQL_PATTERNS.items():
-            matches = re.findall(pattern, code, re.IGNORECASE)
-            if matches:
-                results['sql_injection']['score'] += len(matches) * 10
-                results['sql_injection']['indicators'].append({
-                    'pattern': pattern_name,
-                    'count': len(matches),
-                    'sample': matches[0][:100] if matches else ''
-                })
+        # Map vulnerability types to their pattern dictionaries
+        vuln_pattern_map = {
+            'sql_injection': self.extractor.SQL_PATTERNS,
+            'ssrf': self.extractor.SSRF_PATTERNS,
+            'authentication_bypass': self.extractor.AUTH_BYPASS_PATTERNS,
+            'input_validation': self.extractor.INPUT_VALIDATION_PATTERNS,
+        }
 
-        # Check SSRF patterns
-        for pattern_name, pattern in self.extractor.SSRF_PATTERNS.items():
-            matches = re.findall(pattern, code, re.IGNORECASE)
-            if matches:
-                results['ssrf']['score'] += len(matches) * 10
-                results['ssrf']['indicators'].append({
-                    'pattern': pattern_name,
-                    'count': len(matches),
-                    'sample': matches[0][:100] if matches else ''
-                })
-
-        # Check Authentication Bypass patterns
-        for pattern_name, pattern in self.extractor.AUTH_BYPASS_PATTERNS.items():
-            matches = re.findall(pattern, code, re.IGNORECASE)
-            if matches:
-                results['authentication_bypass']['score'] += len(matches) * 10
-                results['authentication_bypass']['indicators'].append({
-                    'pattern': pattern_name,
-                    'count': len(matches),
-                    'sample': matches[0][:100] if matches else ''
-                })
-
-        # Check Input Validation patterns
-        for pattern_name, pattern in self.extractor.INPUT_VALIDATION_PATTERNS.items():
-            matches = re.findall(pattern, code, re.IGNORECASE)
-            if matches:
-                results['input_validation']['score'] += len(matches) * 10
-                results['input_validation']['indicators'].append({
-                    'pattern': pattern_name,
-                    'count': len(matches),
-                    'sample': matches[0][:100] if matches else ''
-                })
+        # Check patterns for each vulnerability type using severity weights
+        for vuln_type, patterns in vuln_pattern_map.items():
+            max_weight = 0
+            for pattern_name, (pattern, weight) in patterns.items():
+                matches = re.findall(pattern, code, re.IGNORECASE)
+                if matches:
+                    # Track the highest severity weight found
+                    max_weight = max(max_weight, weight)
+                    # Add smaller increment for additional pattern matches
+                    results[vuln_type]['score'] += weight
+                    results[vuln_type]['indicators'].append({
+                        'pattern': pattern_name,
+                        'count': len(matches),
+                        'weight': weight,
+                        'sample': matches[0][:100] if matches else ''
+                    })
+            # Use the highest matched pattern weight as the base confidence
+            # This ensures a single critical pattern = high confidence
+            if max_weight > 0:
+                results[vuln_type]['score'] = max_weight
 
         # Apply safe pattern deductions
-        for pattern_name, pattern in self.extractor.SAFE_PATTERNS.items():
+        for pattern_name, (pattern, deduction) in self.extractor.SAFE_PATTERNS.items():
             matches = re.findall(pattern, code, re.IGNORECASE)
             if matches:
-                # Reduce scores for each vulnerability type
                 for vuln_type in results:
-                    results[vuln_type]['score'] = max(0, results[vuln_type]['score'] - len(matches) * 5)
+                    results[vuln_type]['score'] = max(0, results[vuln_type]['score'] - len(matches) * deduction)
 
-        # Calculate confidence levels (0-100)
+        # Calculate confidence levels (0-100) and assign severity labels
         for vuln_type in results:
             score = results[vuln_type]['score']
             results[vuln_type]['confidence'] = min(100, score)
+            # Assign severity based on confidence
+            conf = results[vuln_type]['confidence']
+            if conf >= 70:
+                results[vuln_type]['severity'] = 'CRITICAL'
+            elif conf >= 40:
+                results[vuln_type]['severity'] = 'HIGH'
+            elif conf > 0:
+                results[vuln_type]['severity'] = 'MEDIUM'
+            else:
+                results[vuln_type]['severity'] = 'NONE'
             # Clear indicators if safe patterns reduced confidence to 0
             if results[vuln_type]['confidence'] == 0:
                 results[vuln_type]['indicators'] = []
@@ -234,127 +235,22 @@ class VulnerabilityAnalyzer:
             except Exception as e:
                 print(f"[-] ML prediction error: {e}")
 
-        # Generate recommendations
-        recommendations = self._generate_recommendations(rule_results)
+        # Generate recommendations using imported function
+        recommendations = generate_recommendations(rule_results)
         rule_results['recommendations'] = recommendations
 
-        # Determine overall risk level
+        # Determine overall risk level based on highest severity found
         max_confidence = max(r['confidence'] for r in rule_results.values() if isinstance(r, dict) and 'confidence' in r)
         if max_confidence >= 70:
-            rule_results['risk_level'] = 'HIGH'
+            rule_results['risk_level'] = 'CRITICAL'
         elif max_confidence >= 40:
-            rule_results['risk_level'] = 'MEDIUM'
+            rule_results['risk_level'] = 'HIGH'
         elif max_confidence > 0:
-            rule_results['risk_level'] = 'LOW'
+            rule_results['risk_level'] = 'MEDIUM'
         else:
             rule_results['risk_level'] = 'SAFE'
 
         return rule_results
-
-    def _generate_recommendations(self, results):
-        """Generate remediation recommendations based on findings."""
-        recommendations = []
-
-        if results['sql_injection']['confidence'] > 0:
-            recommendations.append({
-                'vulnerability': 'SQL Injection',
-                'severity': 'CRITICAL',
-                'recommendations': [
-                    'Use prepared statements with parameterized queries',
-                    'Use PDO or mysqli with bound parameters',
-                    'Implement input validation and sanitization',
-                    'Apply the principle of least privilege for database accounts',
-                    'Use ORM frameworks that handle SQL safely'
-                ],
-                'example': '''
-// Vulnerable:
-$result = mysqli_query($conn, "SELECT * FROM users WHERE id = " . $_GET['id']);
-
-// Secure:
-$stmt = $conn->prepare("SELECT * FROM users WHERE id = ?");
-$stmt->bind_param("i", $_GET['id']);
-$stmt->execute();
-'''
-            })
-
-        if results['ssrf']['confidence'] > 0:
-            recommendations.append({
-                'vulnerability': 'Server-Side Request Forgery (SSRF)',
-                'severity': 'HIGH',
-                'recommendations': [
-                    'Whitelist allowed domains and protocols',
-                    'Validate and sanitize all URL inputs',
-                    'Block requests to internal IP ranges (127.0.0.1, 10.x.x.x, 192.168.x.x)',
-                    'Disable unnecessary URL schemes (file://, gopher://, dict://)',
-                    'Implement network segmentation'
-                ],
-                'example': '''
-// Vulnerable:
-$content = file_get_contents($_GET['url']);
-
-// Secure:
-$allowed_hosts = ['api.example.com', 'cdn.example.com'];
-$parsed = parse_url($_GET['url']);
-if (in_array($parsed['host'], $allowed_hosts) && $parsed['scheme'] === 'https') {
-    $content = file_get_contents($_GET['url']);
-}
-'''
-            })
-
-        if results['authentication_bypass']['confidence'] > 0:
-            recommendations.append({
-                'vulnerability': 'Authentication Bypass',
-                'severity': 'CRITICAL',
-                'recommendations': [
-                    'Use strict comparison operators (=== instead of ==)',
-                    'Implement proper password hashing with password_hash()',
-                    'Use password_verify() for password comparison',
-                    'Regenerate session IDs after authentication',
-                    'Implement multi-factor authentication',
-                    'Avoid type juggling vulnerabilities'
-                ],
-                'example': '''
-// Vulnerable:
-if ($_POST['password'] == $stored_password) { }
-if (strcmp($_POST['password'], $stored_password) == 0) { }
-
-// Secure:
-$hashed = password_hash($password, PASSWORD_DEFAULT);
-if (password_verify($_POST['password'], $stored_hash)) {
-    session_regenerate_id(true);
-}
-'''
-            })
-
-        if results['input_validation']['confidence'] > 0:
-            recommendations.append({
-                'vulnerability': 'Input Validation Issues',
-                'severity': 'HIGH',
-                'recommendations': [
-                    'Validate all user inputs against expected formats',
-                    'Use filter_input() and filter_var() for sanitization',
-                    'Encode output with htmlspecialchars() to prevent XSS',
-                    'Never use user input directly in system commands',
-                    'Implement Content Security Policy headers',
-                    'Use parameterized file operations'
-                ],
-                'example': '''
-// Vulnerable:
-echo $_GET['name'];
-include($_GET['page'] . '.php');
-
-// Secure:
-$name = htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8');
-echo $name;
-
-$allowed_pages = ['home', 'about', 'contact'];
-if (in_array($_GET['page'], $allowed_pages)) {
-    include($_GET['page'] . '.php');
-}
-'''
-            })
-
-        return recommendations
 
 
 # Initialize the analyzer

@@ -142,6 +142,12 @@
             font-weight: bold;
         }
 
+        .risk-level.CRITICAL {
+            background: linear-gradient(135deg, rgba(200, 0, 0, 0.3) 0%, rgba(139, 0, 0, 0.3) 100%);
+            border: 2px solid #ff0000;
+            color: #ff0000;
+        }
+
         .risk-level.HIGH {
             background: linear-gradient(135deg, rgba(255, 0, 0, 0.2) 0%, rgba(200, 0, 0, 0.2) 100%);
             border: 2px solid #ff4444;
@@ -172,6 +178,10 @@
             padding: 20px;
             margin-bottom: 15px;
             border-left: 4px solid transparent;
+        }
+
+        .vulnerability-card.critical-risk {
+            border-left-color: #ff0000;
         }
 
         .vulnerability-card.high-risk {
@@ -294,6 +304,16 @@
         .severity-badge.HIGH {
             background: #ff4444;
             color: white;
+        }
+
+        .severity-badge.MEDIUM {
+            background: #ffa500;
+            color: white;
+        }
+
+        .severity-badge.NONE {
+            background: #444;
+            color: #888;
         }
 
         .recommendation-card ul {
@@ -517,22 +537,29 @@ $result = mysqli_query($conn, $query);
                 const vulnData = data[vuln.key];
                 if (vulnData) {
                     const confidence = vulnData.confidence;
+                    const severity = vulnData.severity || 'NONE';
                     let riskClass = 'low-risk';
                     let fillClass = 'low';
 
                     if (confidence >= 70) {
-                        riskClass = 'high-risk';
+                        riskClass = 'critical-risk';
                         fillClass = 'high';
                     } else if (confidence >= 40) {
-                        riskClass = 'medium-risk';
+                        riskClass = 'high-risk';
                         fillClass = 'medium';
+                    } else if (confidence > 0) {
+                        riskClass = 'medium-risk';
+                        fillClass = 'low';
                     }
 
                     cardsHtml += `
                         <div class="vulnerability-card ${riskClass}">
                             <h3>
                                 <span>${vuln.name}</span>
-                                <span>${confidence}%</span>
+                                <span>
+                                    ${severity !== 'NONE' ? `<span class="severity-badge ${severity}">${severity}</span>` : ''}
+                                    ${confidence}%
+                                </span>
                             </h3>
                             <div class="confidence-bar">
                                 <div class="confidence-fill ${fillClass}" style="width: ${confidence}%"></div>
@@ -543,7 +570,8 @@ $result = mysqli_query($conn, $query);
                                     <strong>Detected Patterns:</strong>
                                     ${vulnData.indicators.map(ind => `
                                         <div class="indicator">
-                                            <span class="pattern-name">${ind.pattern}</span> (found ${ind.count} time${ind.count > 1 ? 's' : ''})
+                                            <span class="pattern-name">${ind.pattern}</span>
+                                            (found ${ind.count} time${ind.count > 1 ? 's' : ''}${ind.weight ? ', weight: ' + ind.weight : ''})
                                             ${ind.sample ? `<div class="sample">${escapeHtml(ind.sample)}</div>` : ''}
                                         </div>
                                     `).join('')}

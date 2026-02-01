@@ -2,11 +2,14 @@
 """
 Model Training Script for PHP Vulnerability Classifier
 
-Trains a machine learning model to classify PHP code vulnerabilities:
+Trains a machine learning model to classify PHP code vulnerabilities
+and predict impact severity:
 - SQL Injection
 - SSRF
 - Authentication Bypass
 - Input Validation Issues
+
+Impact levels: critical (3), high (2), medium (1), low/safe (0)
 """
 
 import json
@@ -26,6 +29,15 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from app import PHPFeatureExtractor
 
+# Impact encoding
+IMPACT_ENCODING = {
+    'critical': 3,
+    'high': 2,
+    'medium': 1,
+    'low': 0,
+    'safe': 0
+}
+
 
 def load_dataset(filepath):
     """Load the dataset from JSON file."""
@@ -34,7 +46,10 @@ def load_dataset(filepath):
 
 
 def prepare_data(dataset, extractor):
-    """Prepare features and labels from the dataset."""
+    """Prepare features and labels from the dataset.
+
+    Labels include 4 vulnerability type columns + 1 impact severity column.
+    """
     X = []
     y = []
 
@@ -44,12 +59,14 @@ def prepare_data(dataset, extractor):
         features = extractor.extract_features(code)
         X.append(features)
 
-        # Multi-label format
+        # Multi-label format: 4 vuln types + 1 impact severity
+        impact = sample.get('impact', 'safe')
         labels = [
             sample['labels']['sql_injection'],
             sample['labels']['ssrf'],
             sample['labels']['authentication_bypass'],
-            sample['labels']['input_validation']
+            sample['labels']['input_validation'],
+            IMPACT_ENCODING.get(impact, 0)
         ]
         y.append(labels)
 
@@ -70,9 +87,9 @@ def train_model(X_train, y_train, X_test, y_test):
 
     # Use RandomForest with MultiOutput wrapper for multi-label classification
     base_classifier = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=15,
-        min_samples_split=5,
+        n_estimators=150,
+        max_depth=20,
+        min_samples_split=3,
         min_samples_leaf=2,
         random_state=42,
         n_jobs=-1
@@ -88,12 +105,21 @@ def train_model(X_train, y_train, X_test, y_test):
     print("MODEL EVALUATION RESULTS")
     print("="*60)
 
-    labels = ['SQL Injection', 'SSRF', 'Auth Bypass', 'Input Validation']
+    vuln_labels = ['SQL Injection', 'SSRF', 'Auth Bypass', 'Input Validation']
 
-    for i, label in enumerate(labels):
+    for i, label in enumerate(vuln_labels):
         print(f"\n{label}:")
         print("-" * 40)
         print(classification_report(y_test[:, i], y_pred[:, i], target_names=['Safe', 'Vulnerable']))
+
+    # Impact severity evaluation
+    print(f"\nImpact Severity:")
+    print("-" * 40)
+    impact_names = ['Safe/Low', 'Medium', 'High', 'Critical']
+    # Only include labels that actually appear in the data
+    unique_labels = sorted(set(y_test[:, 4]) | set(y_pred[:, 4]))
+    target_names = [impact_names[int(l)] for l in unique_labels]
+    print(classification_report(y_test[:, 4], y_pred[:, 4], labels=unique_labels, target_names=target_names))
 
     # Overall accuracy
     print("\n" + "="*60)
@@ -103,9 +129,12 @@ def train_model(X_train, y_train, X_test, y_test):
     exact_match = np.all(y_pred == y_test, axis=1).mean()
     print(f"Exact Match Ratio: {exact_match:.4f}")
 
-    for i, label in enumerate(labels):
+    for i, label in enumerate(vuln_labels):
         acc = accuracy_score(y_test[:, i], y_pred[:, i])
         print(f"{label} Accuracy: {acc:.4f}")
+
+    impact_acc = accuracy_score(y_test[:, 4], y_pred[:, 4])
+    print(f"Impact Severity Accuracy: {impact_acc:.4f}")
 
     return model, scaler
 
@@ -115,8 +144,9 @@ def save_model(model, scaler, filepath):
     data = {
         'model': model,
         'scaler': scaler,
-        'version': '1.0',
-        'labels': ['sql_injection', 'ssrf', 'authentication_bypass', 'input_validation']
+        'version': '2.0',
+        'labels': ['sql_injection', 'ssrf', 'authentication_bypass', 'input_validation', 'impact'],
+        'impact_encoding': IMPACT_ENCODING
     }
 
     with open(filepath, 'wb') as f:
@@ -129,6 +159,7 @@ def main():
     print("""
     ╔═══════════════════════════════════════════════════════════╗
     ║       PHP Vulnerability Classifier - Model Training       ║
+    ║           v2.0 - With Impact Severity Prediction          ║
     ╚═══════════════════════════════════════════════════════════╝
     """)
 
@@ -142,12 +173,20 @@ def main():
         print(f"Dataset not found at {dataset_path}")
         print("Running dataset generator first...")
         from generate_dataset import generate_dataset
-        generate_dataset(500, dataset_path)
+        generate_dataset(1000, dataset_path)
 
     # Load dataset
     print(f"Loading dataset from {dataset_path}")
     dataset = load_dataset(dataset_path)
     print(f"Loaded {len(dataset)} samples")
+
+    # Check for impact field
+    has_impact = all('impact' in s for s in dataset)
+    if not has_impact:
+        print("\nWARNING: Dataset missing 'impact' field. Regenerating...")
+        from generate_dataset import generate_dataset
+        generate_dataset(1000, dataset_path)
+        dataset = load_dataset(dataset_path)
 
     # Initialize feature extractor
     extractor = PHPFeatureExtractor()

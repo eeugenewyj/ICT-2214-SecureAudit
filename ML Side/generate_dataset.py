@@ -254,6 +254,52 @@ $fp = fsockopen($host, $port, $errno, $errstr, 30);
 fputs($fp, "GET / HTTP/1.1\r\n\r\n");
 echo fgets($fp, 128);
 ?>''',
+    '''<?php
+$data = file_get_contents("http://169.254.169.254/latest/meta-data/");
+echo $data;
+?>''',
+    '''<?php
+$meta = file_get_contents("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
+?>''',
+    '''<?php
+$ch = curl_init("http://metadata.google.internal/computeMetadata/v1/");
+curl_setopt($ch, CURLOPT_HTTPHEADER, ['Metadata-Flavor: Google']);
+echo curl_exec($ch);
+?>''',
+    '''<?php
+$admin = file_get_contents("http://localhost/admin");
+echo $admin;
+?>''',    
+    '''<?php
+$internal = file_get_contents("http://127.0.0.1:8080/status");
+?>''',    
+    '''<?php
+$data = file_get_contents("http://192.168.1.1/config");
+?>''',
+    '''<?php
+$url = $_GET['url'];
+$ch = curl_init($url);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
+echo curl_exec($ch);
+?>''',  
+    '''<?php
+$ch = curl_init($_POST['endpoint']);
+curl_setopt_array($ch, [
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_RETURNTRANSFER => true
+]);
+$response = curl_exec($ch);
+?>''',  
+    '''<?php
+$service = "http://10.0.0.5:9200/_search";
+$result = file_get_contents($service);
+?>''',  
+    '''<?php
+$ch = curl_init("http://localhost:6379/");
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+echo curl_exec($ch);
+?>''',
 ]
 
 SSRF_HIGH = [

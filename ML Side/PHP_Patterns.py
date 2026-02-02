@@ -49,6 +49,11 @@ SSRF_PATTERNS = {
     'stream_context': (r'stream_context_create\s*\([^)]*\$_(?:GET|POST|REQUEST)', 65),
     'gethostbyname': (r'gethostbyname\s*\(\s*\$_(?:GET|POST|REQUEST)', 60),
     'dns_get_record': (r'dns_get_record\s*\(\s*\$_(?:GET|POST|REQUEST)', 55),
+    'metadata_endpoint': (r'169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200', 90),
+    'localhost_access': (r'(?:file_get_contents|curl_init|fopen)\s*\(\s*[\'"]https?://(?:localhost|127\.0\.0\.1)', 80),
+    'follow_redirects': (r'CURLOPT_FOLLOWLOCATION\s*,\s*true', 55),
+    'internal_ip_ranges': (r'(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)', 70),
+    'cloud_metadata': (r'(?:metadata|instance-data)\.(?:google|amazonaws|azure|digitalocean)', 85),
 }
 
 # Authentication Bypass indicators

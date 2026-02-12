@@ -19,6 +19,8 @@ from collections import deque
 import concurrent.futures
 import sys
 import os
+from third_party_scanner import ThirdPartyScanner
+
 
 # Disable SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -295,6 +297,7 @@ class HTMLCrawler:
 
         # Initialize scanner with patterns
         self.scanner = VulnerabilityScanner(patterns_file)
+        self.third_party_scanner = ThirdPartyScanner(self.base_domain)
 
         # Load wordlists
         self.common_dirs = []
@@ -352,6 +355,77 @@ class HTMLCrawler:
             return response
         except requests.exceptions.RequestException as e:
             return None
+
+    def check_security_headers(self, response, url):
+        findings = []
+
+        required_headers = {
+            'Content-Security-Policy': 'Missing Content-Security-Policy header',
+            'X-Frame-Options': 'Missing X-Frame-Options header',
+            'X-Content-Type-Options': 'Missing X-Content-Type-Options header',
+            'Strict-Transport-Security': 'Missing Strict-Transport-Security header',
+            'Referrer-Policy': 'Missing Referrer-Policy header'
+        }
+
+        headers = response.headers
+
+        for header, description in required_headers.items():
+            if header not in headers:
+                findings.append({
+                    'type': 'SECURITY_HEADER',
+                    'name': header,
+                    'severity': 'MEDIUM',
+                    'description': description,
+                    'url': url,
+                    'line': 0,
+                    'code_snippet': 'Header not present'
+                })
+
+        return findings
+
+    def check_cookie_security(self, response, url):
+        findings = []
+
+        for cookie in response.cookies:
+            cookie_name = cookie.name
+
+            # Secure flag
+            if not cookie.secure:
+                findings.append({
+                    'type': 'COOKIE_SECURITY',
+                    'name': 'Missing Secure flag',
+                    'severity': 'MEDIUM',
+                    'description': f'Cookie "{cookie_name}" is missing Secure flag',
+                    'url': url,
+                    'line': 0,
+                    'code_snippet': f'Cookie: {cookie_name}'
+                })
+
+            # HttpOnly flag
+            if not cookie.has_nonstandard_attr('HttpOnly') and 'httponly' not in cookie._rest:
+                findings.append({
+                    'type': 'COOKIE_SECURITY',
+                    'name': 'Missing HttpOnly flag',
+                    'severity': 'MEDIUM',
+                    'description': f'Cookie "{cookie_name}" is missing HttpOnly flag',
+                    'url': url,
+                    'line': 0,
+                    'code_snippet': f'Cookie: {cookie_name}'
+                })
+
+            # SameSite flag
+            if 'samesite' not in {k.lower() for k in cookie._rest.keys()}:
+                findings.append({
+                    'type': 'COOKIE_SECURITY',
+                    'name': 'Missing SameSite attribute',
+                    'severity': 'LOW',
+                    'description': f'Cookie "{cookie_name}" is missing SameSite attribute',
+                    'url': url,
+                    'line': 0,
+                    'code_snippet': f'Cookie: {cookie_name}'
+                })
+
+        return findings
 
     def normalize_url(self, url):
         """Normalize and resolve relative URLs."""
@@ -448,9 +522,21 @@ class HTMLCrawler:
 
         print(f"  [*] Crawling: {url} (Depth: {depth})")
 
+        # Check cookie security flags
+        cookie_findings = self.check_cookie_security(response, url)
+        self.all_vulnerabilities.extend(cookie_findings)
+
+        # Check security headers
+        header_findings = self.check_security_headers(response, url)
+        self.all_vulnerabilities.extend(header_findings)
+
         # Analyze page for vulnerabilities
         vulnerabilities = self.scanner.analyze_html(response.text, url)
         self.all_vulnerabilities.extend(vulnerabilities)
+
+        # Analyze page for third-party libraries and insecure dependencies
+        third_party = self.third_party_scanner.analyze(response.text, url)
+        self.all_vulnerabilities.extend(third_party)
 
         # Extract links
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -509,7 +595,8 @@ class HTMLCrawler:
                 'medium': len([v for v in self.all_vulnerabilities if v['severity'] == 'MEDIUM']),
                 'low': len([v for v in self.all_vulnerabilities if v['severity'] == 'LOW']),
                 'xss_count': len([v for v in self.all_vulnerabilities if v['type'] == 'XSS']),
-                'csrf_count': len([v for v in self.all_vulnerabilities if v['type'] == 'CSRF'])
+                'csrf_count': len([v for v in self.all_vulnerabilities if v['type'] == 'CSRF']),
+                'cookie_issues': len([v for v in self.all_vulnerabilities if v['type'] == 'COOKIE_SECURITY'])
             },
             'discovered_urls': list(self.discovered_urls),
             'vulnerabilities': self.all_vulnerabilities
@@ -538,6 +625,29 @@ class HTMLCrawler:
         print(f"\nBy Type:")
         print(f"  - XSS: {report['summary']['xss_count']}")
         print(f"  - CSRF: {report['summary']['csrf_count']}")
+
+        print("\n" + "=" * 60)
+        print("OTHER FINDINGS (Third-Party & Configuration)")
+        print("=" * 60)
+
+        shown = False
+
+        for v in self.all_vulnerabilities:
+            if v['type'] in [
+                'THIRD_PARTY_LIBRARY',
+                'EXTERNAL_SERVICE',
+                'INSECURE_DEPENDENCY',
+                'SECURITY_HEADER',
+                'COOKIE_SECURITY'
+            ]:
+                shown = True
+                print(f"\n[{v['type']}] {v['severity']}")
+                print(f"  Description: {v['description']}")
+                print(f"  URL: {v['url']}")
+                print(f"  Evidence: {v['code_snippet']}")
+
+        if not shown:
+            print("No third-party or configuration issues detected.")
 
         if self.all_vulnerabilities:
             print("\n" + "-"*60)

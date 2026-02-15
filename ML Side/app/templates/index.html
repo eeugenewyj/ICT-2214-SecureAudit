@@ -125,6 +125,31 @@
             box-shadow: none;
         }
 
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 50px 20px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid rgba(0, 217, 255, 0.1);
+            border-radius: 50%;
+            border-top: 4px solid #00d9ff;
+            width: 60px;
+            height: 60px;
+            margin: 0 auto 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
         .results-container {
             display: none;
         }
@@ -208,6 +233,35 @@
             font-size: 1rem;
         }
 
+        .severity-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 5px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        .severity-badge.CRITICAL {
+            background: #ff0000;
+            color: #fff;
+        }
+
+        .severity-badge.HIGH {
+            background: #ff4444;
+            color: #fff;
+        }
+
+        .severity-badge.MEDIUM {
+            background: #ffa500;
+            color: #000;
+        }
+
+        .severity-badge.LOW {
+            background: #ffff00;
+            color: #000;
+        }
+
         .confidence-bar {
             width: 100%;
             height: 10px;
@@ -249,19 +303,24 @@
             border: 1px solid rgba(0, 217, 255, 0.3);
             border-radius: 5px;
             padding: 10px;
-            margin-top: 10px;
-            font-family: monospace;
-            font-size: 0.85rem;
+            margin-top: 8px;
+            font-size: 0.9rem;
         }
 
-        .indicator .pattern-name {
+        .pattern-name {
             color: #00d9ff;
             font-weight: bold;
         }
 
-        .indicator .sample {
-            color: #ff6b6b;
-            margin-top: 5px;
+        .sample {
+            margin-top: 8px;
+            padding: 8px;
+            background: #0d1117;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #c9d1d9;
+            white-space: pre-wrap;
             word-break: break-all;
         }
 
@@ -269,108 +328,53 @@
             margin-top: 30px;
         }
 
-        .recommendations-section h2 {
-            margin-bottom: 20px;
-        }
-
         .recommendation-card {
-            background: rgba(0, 100, 0, 0.1);
-            border: 1px solid rgba(0, 255, 0, 0.3);
+            background: rgba(0, 217, 255, 0.05);
+            border: 1px solid rgba(0, 217, 255, 0.2);
             border-radius: 10px;
             padding: 20px;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
         }
 
         .recommendation-card h4 {
-            color: #00ff88;
+            color: #00d9ff;
             margin-bottom: 15px;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
 
-        .severity-badge {
-            padding: 5px 10px;
-            border-radius: 5px;
-            font-size: 0.8rem;
-            font-weight: bold;
-        }
-
-        .severity-badge.CRITICAL {
-            background: #ff0000;
-            color: white;
-        }
-
-        .severity-badge.HIGH {
-            background: #ff4444;
-            color: white;
-        }
-
-        .severity-badge.MEDIUM {
-            background: #ffa500;
-            color: white;
-        }
-
-        .severity-badge.NONE {
-            background: #444;
-            color: #888;
-        }
-
         .recommendation-card ul {
             list-style: none;
-            margin-bottom: 15px;
+            padding-left: 20px;
         }
 
-        .recommendation-card ul li {
-            padding: 8px 0;
-            padding-left: 25px;
+        .recommendation-card li {
+            margin-bottom: 10px;
             position: relative;
-            color: #aaa;
+            padding-left: 20px;
         }
 
-        .recommendation-card ul li::before {
-            content: '✓';
+        .recommendation-card li:before {
+            content: "→";
             position: absolute;
             left: 0;
-            color: #00ff88;
+            color: #00d9ff;
         }
 
         .code-example {
+            margin-top: 15px;
             background: #0d1117;
             border-radius: 8px;
             padding: 15px;
-            overflow-x: auto;
         }
 
         .code-example pre {
-            font-family: 'Consolas', monospace;
-            font-size: 0.85rem;
             color: #c9d1d9;
+            font-family: monospace;
+            font-size: 0.9rem;
             white-space: pre-wrap;
-        }
-
-        .loading {
-            display: none;
-            text-align: center;
-            padding: 40px;
-        }
-
-        .loading.active {
-            display: block;
-        }
-
-        .spinner {
-            width: 50px;
-            height: 50px;
-            border: 4px solid rgba(0, 217, 255, 0.2);
-            border-top-color: #00d9ff;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 20px;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
+            word-break: break-all;
         }
 
         .error-message {
@@ -520,24 +524,21 @@ $result = mysqli_query($conn, $query);
             const recommendationsSection = document.getElementById('recommendationsSection');
             const recommendationsContent = document.getElementById('recommendationsContent');
 
-            // Display risk level
-            riskLevel.className = 'risk-level ' + data.risk_level;
-            riskLevel.textContent = 'Risk Level: ' + data.risk_level;
+            console.log('Full API response:', data); // Debug
 
-            // Build vulnerability cards
+            // Display risk level - FIXED: use camelCase riskLevel
+            const riskLevelValue = data.riskLevel || 'SAFE';
+            riskLevel.className = 'risk-level ' + riskLevelValue;
+            riskLevel.textContent = 'Risk Level: ' + riskLevelValue;
+
+            // Build vulnerability cards - FIXED: use data.vulnerabilities array
             let cardsHtml = '';
-            const vulnerabilities = [
-                { key: 'sql_injection', name: 'SQL Injection' },
-                { key: 'ssrf', name: 'SSRF' },
-                { key: 'authentication_bypass', name: 'Authentication Bypass' },
-                { key: 'input_validation', name: 'Input Validation' }
-            ];
-
-            vulnerabilities.forEach(vuln => {
-                const vulnData = data[vuln.key];
-                if (vulnData) {
-                    const confidence = vulnData.confidence;
-                    const severity = vulnData.severity || 'NONE';
+            
+            if (data.vulnerabilities && data.vulnerabilities.length > 0) {
+                // Use the formatted vulnerabilities array from the API
+                data.vulnerabilities.forEach(vuln => {
+                    const confidence = vuln.confidence || 0;
+                    const severity = vuln.severity || 'NONE';
                     let riskClass = 'low-risk';
                     let fillClass = 'low';
 
@@ -555,7 +556,7 @@ $result = mysqli_query($conn, $query);
                     cardsHtml += `
                         <div class="vulnerability-card ${riskClass}">
                             <h3>
-                                <span>${vuln.name}</span>
+                                <span>${vuln.type.replace(/_/g, ' ').toUpperCase()}</span>
                                 <span>
                                     ${severity !== 'NONE' ? `<span class="severity-badge ${severity}">${severity}</span>` : ''}
                                     ${confidence}%
@@ -564,50 +565,46 @@ $result = mysqli_query($conn, $query);
                             <div class="confidence-bar">
                                 <div class="confidence-fill ${fillClass}" style="width: ${confidence}%"></div>
                             </div>
-                            <p class="confidence-text">Confidence: ${confidence}%${vulnData.ml_score !== undefined ? ' (ML: ' + vulnData.ml_score.toFixed(1) + '%)' : ''}</p>
-                            ${vulnData.indicators && vulnData.indicators.length > 0 ? `
-                                <div class="indicators">
-                                    <strong>Detected Patterns:</strong>
-                                    ${vulnData.indicators.map(ind => `
-                                        <div class="indicator">
-                                            <span class="pattern-name">${ind.pattern}</span>
-                                            (found ${ind.count} time${ind.count > 1 ? 's' : ''}${ind.weight ? ', weight: ' + ind.weight : ''})
-                                            ${ind.sample ? `<div class="sample">${escapeHtml(ind.sample)}</div>` : ''}
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            ` : ''}
+                            <p class="confidence-text">Confidence: ${confidence}%</p>
+                            <div class="indicators">
+                                <strong>Pattern:</strong> ${vuln.pattern}<br>
+                                <strong>CWE:</strong> ${vuln.cwe}<br>
+                                <strong>OWASP:</strong> ${vuln.owasp}<br>
+                                <strong>Priority:</strong> ${vuln.fix_priority}
+                                ${vuln.remediation && vuln.remediation.title ? `
+                                    <div style="margin-top: 10px;">
+                                        <strong>Fix:</strong> ${vuln.remediation.title}<br>
+                                        <small>${vuln.remediation.description}</small>
+                                    </div>
+                                ` : ''}
+                            </div>
                         </div>
                     `;
-                }
-            });
+                });
+            } else {
+                cardsHtml = `
+                    <div class="vulnerability-card low-risk">
+                        <h3><span>No Vulnerabilities Detected</span></h3>
+                        <p>The code appears to be safe based on our analysis.</p>
+                    </div>
+                `;
+            }
 
             vulnerabilityCards.innerHTML = cardsHtml;
             results.classList.add('active');
 
-            // Display recommendations
-            if (data.recommendations && data.recommendations.length > 0) {
-                let recsHtml = '';
-                data.recommendations.forEach(rec => {
-                    recsHtml += `
-                        <div class="recommendation-card">
-                            <h4>
-                                ${rec.vulnerability}
-                                <span class="severity-badge ${rec.severity}">${rec.severity}</span>
-                            </h4>
-                            <ul>
-                                ${rec.recommendations.map(r => `<li>${r}</li>`).join('')}
-                            </ul>
-                            ${rec.example ? `
-                                <div class="code-example">
-                                    <pre>${escapeHtml(rec.example)}</pre>
-                                </div>
-                            ` : ''}
-                        </div>
-                    `;
-                });
-                recommendationsContent.innerHTML = recsHtml;
-                recommendationsSection.style.display = 'block';
+            // Display ML prediction if available
+            if (data.results && data.results.ml_prediction) {
+                const ml = data.results.ml_prediction;
+                const mlCard = `
+                    <div class="vulnerability-card" style="border-left-color: #00d9ff;">
+                        <h3><span>ML Prediction</span></h3>
+                        <p>Vulnerable: ${(ml.vulnerable_probability * 100).toFixed(1)}%</p>
+                        <p>Safe: ${(ml.safe_probability * 100).toFixed(1)}%</p>
+                        <p><strong>Prediction:</strong> ${ml.prediction.toUpperCase()}</p>
+                    </div>
+                `;
+                vulnerabilityCards.innerHTML += mlCard;
             }
         }
 

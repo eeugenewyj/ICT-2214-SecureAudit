@@ -6,23 +6,8 @@ import io
 import json
 from datetime import datetime
 
-# Your scanner class
-from HTMLSide import WebVulnerabilityScanner
-
-
-class GUIScanner(WebVulnerabilityScanner):
-    """
-    Subclass your scanner so we can capture the vulnerabilities list that
-    display_results() receives, while keeping the original printing behavior.
-    """
-    def __init__(self, target_url):
-        super().__init__(target_url)
-        self.last_vulnerabilities = []
-
-    def display_results(self, vulnerabilities):
-        self.last_vulnerabilities = vulnerabilities[:] if vulnerabilities else []
-        # Call original behavior (prints report)
-        super().display_results(vulnerabilities)
+# NEW: use the updated crawler
+from crawler import HTMLCrawler
 
 
 class NeonStyle:
@@ -37,6 +22,21 @@ class NeonStyle:
     ORANGE = "#ff8a2a"
     YELLOW = "#ffd02a"
     GREEN = "#2aff8a"
+
+
+def severity_normalize(sev: str) -> str:
+    """
+    crawler.py uses uppercase severities (HIGH/MEDIUM/etc).
+    GUI expects Title case (High/Medium/etc).
+    """
+    if not sev:
+        return "Low"
+    s = str(sev).strip()
+    upper = s.upper()
+    if upper in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        return upper.title()
+    # already title-case or unknown
+    return s.title()
 
 
 def severity_to_rank(sev: str) -> int:
@@ -60,6 +60,104 @@ def risk_label_and_color(vulns):
     return "UNKNOWN", NeonStyle.MUTED
 
 
+def build_recommendations(vulns):
+    """
+    crawler.py does not print a recommendation block.
+    Generate remediation guidance based on vulnerability types detected.
+    """
+    if not vulns:
+        return (
+            "✅ No issues detected.\n\n"
+            "Keep these controls in place:\n"
+            "• Server-side validation\n"
+            "• Output encoding for user-controlled data\n"
+            "• CSRF tokens + SameSite cookies\n"
+            "• Safe DOM APIs (textContent) instead of innerHTML\n"
+            "• Security headers (CSP, HSTS, XFO, XCTO)\n"
+        )
+
+    types = {v.get("type", "") for v in vulns}
+    recs = []
+
+    # XSS
+    if "XSS" in types:
+        recs.extend([
+            "XSS:",
+            "1) Prefer textContent/createTextNode over innerHTML/outerHTML",
+            "2) Encode output based on context (HTML/attr/JS/URL)",
+            "3) Add a strict Content-Security-Policy (CSP) to reduce impact",
+            ""
+        ])
+
+    # CSRF
+    if "CSRF" in types:
+        recs.extend([
+            "CSRF:",
+            "1) Add CSRF tokens to all state-changing POST/PUT/DELETE forms/requests",
+            "2) Validate Origin/Referer on sensitive endpoints",
+            "3) Use SameSite=Lax/Strict cookies where possible",
+            ""
+        ])
+
+    # SQLi (crawler type is 'SQLI')
+    if "SQLI" in types:
+        recs.extend([
+            "SQL Injection:",
+            "1) Use parameterized queries / prepared statements everywhere",
+            "2) Avoid string concatenation in SQL queries",
+            "3) Apply least-privilege DB accounts and safe error handling (no SQL error leakage)",
+            ""
+        ])
+
+    # Security headers
+    if "SECURITY_HEADER" in types:
+        recs.extend([
+            "Security Headers:",
+            "1) Add CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy",
+            "2) Add Strict-Transport-Security if you enforce HTTPS",
+            ""
+        ])
+
+    # Cookies
+    if "COOKIE_SECURITY" in types:
+        recs.extend([
+            "Cookie Hardening:",
+            "1) Mark session cookies as Secure + HttpOnly",
+            "2) Set SameSite=Lax/Strict unless cross-site flows require None;Secure",
+            ""
+        ])
+
+    # Third-party / dependency issues
+    if any(t in types for t in ("THIRD_PARTY_LIBRARY", "INSECURE_DEPENDENCY", "EXTERNAL_SERVICE")):
+        recs.extend([
+            "Dependencies / Third-party:",
+            "1) Pin versions and patch outdated libraries",
+            "2) Remove unused libraries and avoid loading JS from untrusted CDNs",
+            ""
+        ])
+
+    # Generic baseline
+    recs.extend([
+        "Baseline:",
+        "• Implement server-side validation for all inputs",
+        "• Add rate limiting + logging on auth / sensitive endpoints",
+        "• Keep secrets out of client-side code",
+    ])
+
+    # De-duplicate while preserving order
+    seen = set()
+    final = []
+    for line in recs:
+        key = line.strip().lower()
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        final.append(line)
+
+    return "\n".join(final).strip()
+
+
 class ScannerGUI:
     def __init__(self, root):
         self.root = root
@@ -70,13 +168,13 @@ class ScannerGUI:
         self.last_output_text = ""
         self.last_vulns = []
         self.last_target = ""
+        self.last_report = None
 
         self._build_styles()
         self._build_layout()
 
     def _build_styles(self):
         style = ttk.Style()
-        # Use "clam" so we can theme ttk elements
         style.theme_use("clam")
 
         style.configure("Neon.TFrame", background=NeonStyle.BG)
@@ -108,18 +206,16 @@ class ScannerGUI:
                         darkcolor=NeonStyle.CYAN)
 
     def _build_layout(self):
-        # Header
         header = ttk.Frame(self.root, style="Neon.TFrame")
         header.pack(fill=tk.X, padx=18, pady=(18, 10))
 
         ttk.Label(header, text="Web Vulnerability Analyzer", style="Title.TLabel").pack(anchor="center")
         ttk.Label(
             header,
-            text="Static analysis for forms + client-side script patterns (scanner output + exportable report)",
+            text="Crawler-based scan (directory/file enumeration + HTML/static analysis + third-party signals)",
             style="SubTitle.TLabel"
         ).pack(anchor="center", pady=(6, 0))
 
-        # Main split
         main = ttk.Frame(self.root, style="Neon.TFrame")
         main.pack(fill=tk.BOTH, expand=True, padx=18, pady=12)
 
@@ -127,7 +223,6 @@ class ScannerGUI:
         main.columnconfigure(1, weight=1)
         main.rowconfigure(0, weight=1)
 
-        # Left: Input panel
         left = ttk.Frame(main, style="Panel.TFrame")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=0)
         left.columnconfigure(0, weight=1)
@@ -158,7 +253,6 @@ class ScannerGUI:
         self.scan_btn = ttk.Button(url_row, text="Analyze", style="Neon.TButton", command=self.start_scan)
         self.scan_btn.grid(row=0, column=1, sticky="e")
 
-        # Console output (like your terminal report)
         self.output = scrolledtext.ScrolledText(
             left,
             wrap=tk.WORD,
@@ -171,7 +265,6 @@ class ScannerGUI:
         )
         self.output.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 10))
 
-        # Progress + buttons
         bottom = ttk.Frame(left, style="Panel.TFrame")
         bottom.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
         bottom.columnconfigure(0, weight=1)
@@ -190,18 +283,14 @@ class ScannerGUI:
         self.clear_btn = ttk.Button(btns, text="Clear", style="Export.TButton", command=self.clear_output)
         self.clear_btn.grid(row=0, column=1, sticky="e")
 
-        # Right: Results panel
         right = ttk.Frame(main, style="Panel2.TFrame")
         right.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
         right.columnconfigure(0, weight=1)
-
-        # Make findings + recommendations both expand
-        right.rowconfigure(2, weight=3)  # findings
-        right.rowconfigure(4, weight=2)  # recommendations
+        right.rowconfigure(2, weight=3)
+        right.rowconfigure(4, weight=2)
 
         ttk.Label(right, text="📊  Analysis Results", style="PanelTitle2.TLabel").grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
 
-        # Risk banner
         self.risk_frame = tk.Frame(right, bg="#2a1020", highlightthickness=2, highlightbackground=NeonStyle.RED)
         self.risk_frame.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
         self.risk_frame.columnconfigure(0, weight=1)
@@ -216,7 +305,6 @@ class ScannerGUI:
         )
         self.risk_label.grid(row=0, column=0, sticky="ew")
 
-        # Findings list
         self.findings = scrolledtext.ScrolledText(
             right,
             wrap=tk.WORD,
@@ -229,12 +317,10 @@ class ScannerGUI:
         )
         self.findings.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 10))
 
-        # Recommendations panel title
         ttk.Label(right, text="🛠  Remediation Recommendations", style="PanelTitle2.TLabel").grid(
             row=3, column=0, sticky="w", padx=16, pady=(0, 8)
         )
 
-        # Recommendations box
         self.recommendations = scrolledtext.ScrolledText(
             right,
             wrap=tk.WORD,
@@ -248,7 +334,6 @@ class ScannerGUI:
         )
         self.recommendations.grid(row=4, column=0, sticky="nsew", padx=16, pady=(0, 14))
 
-        # Status bar
         self.status = tk.Label(
             self.root,
             text="Ready",
@@ -269,6 +354,7 @@ class ScannerGUI:
         self.last_output_text = ""
         self.last_vulns = []
         self.last_target = ""
+        self.last_report = None
         self.status.config(text="Cleared")
 
     def start_scan(self):
@@ -281,8 +367,6 @@ class ScannerGUI:
         self.status.config(text=f"Scanning {target} …")
         self.scan_btn.state(["disabled"])
         self.export_btn.state(["disabled"])
-
-        # Start indeterminate progress animation
         self.progress.start(12)
 
         t = threading.Thread(target=self._run_scan_thread, args=(target,), daemon=True)
@@ -293,35 +377,60 @@ class ScannerGUI:
         sys.stdout = buffer = io.StringIO()
 
         vulns = []
+        report = None
         try:
-            scanner = GUIScanner(target)
-            scanner.scan()
-            vulns = scanner.last_vulnerabilities
+            # Choose settings similar to crawler defaults
+            max_depth = 3
+            threads = 10
+            timeout = 10
+
+            # If you want enumeration like CLI, set this True.
+            ENABLE_ENUM = True
+
+            crawler = HTMLCrawler(
+                target,
+                max_depth=max_depth,
+                threads=threads,
+                timeout=timeout,
+                patterns_file=None,     # will load default patterns.json next to crawler.py
+                wordlists_file=None     # will load default wordlists.json next to crawler.py
+            )
+
+            if ENABLE_ENUM:
+                found_dirs = crawler.enumerate_directories()
+                base_paths = [d[0] for d in found_dirs if d[1] == 200]
+                crawler.enumerate_files(base_paths if base_paths else None)
+
+            crawler.crawl()
+            report = crawler.generate_report(output_file=None)
+
+            # Normalize severities for GUI
+            vulns = report.get("vulnerabilities", [])
+            for v in vulns:
+                v["severity"] = severity_normalize(v.get("severity"))
+
         except Exception as e:
             print(f"\n[ERROR] {e}")
         finally:
             sys.stdout = old_stdout
 
         output_text = buffer.getvalue()
-        self.root.after(0, self._finish_scan_ui, target, output_text, vulns)
+        self.root.after(0, self._finish_scan_ui, target, output_text, vulns, report)
 
-    def _finish_scan_ui(self, target, output_text, vulns):
+    def _finish_scan_ui(self, target, output_text, vulns, report):
         self.progress.stop()
         self.scan_btn.state(["!disabled"])
 
         self.last_output_text = output_text
         self.last_vulns = vulns
         self.last_target = target
+        self.last_report = report
 
-        # Left console
         self.output.insert(tk.END, output_text)
         self.output.see(tk.END)
 
-        # Right findings summary
         self._render_findings(vulns)
-
-        # Bottom-right recommendations
-        self._render_recommendations(output_text, vulns)
+        self._render_recommendations(vulns)
 
         self.export_btn.state(["!disabled"])
         self.status.config(text=f"Scan complete: {len(vulns)} finding(s)")
@@ -330,7 +439,6 @@ class ScannerGUI:
         self.findings.delete("1.0", tk.END)
 
         label, color = risk_label_and_color(vulns)
-        # Update risk banner colors
         bg = "#2a1020" if label in ("CRITICAL", "HIGH") else "#2a2410" if label == "MEDIUM" else "#1a2a10" if label in ("LOW", "NONE") else "#1a1f2a"
         border = color
 
@@ -338,13 +446,13 @@ class ScannerGUI:
         self.risk_label.config(text=f"Risk Level: {label}", bg=bg, fg=color)
 
         if not vulns:
-            self.findings.insert(tk.END, "✅ No vulnerabilities reported by the scanner.\n")
+            self.findings.insert(tk.END, "✅ No vulnerabilities reported by the crawler.\n")
             return
 
-        # Group by severity
         groups = {"Critical": [], "High": [], "Medium": [], "Low": []}
         for v in vulns:
-            groups.get(v.get("severity", "Low"), groups["Low"]).append(v)
+            sev = v.get("severity", "Low")
+            groups.get(sev, groups["Low"]).append(v)
 
         for sev in ["Critical", "High", "Medium", "Low"]:
             items = groups[sev]
@@ -352,54 +460,29 @@ class ScannerGUI:
                 continue
             self.findings.insert(tk.END, f"\n=== {sev.upper()} ({len(items)}) ===\n")
             for i, v in enumerate(items, 1):
-                t = v.get("type", "Unknown")
-                field = v.get("field", "—")
+                vtype = v.get("type", "Unknown")
+                name = v.get("name", "—")
+                url = v.get("url", "—")
+                line = v.get("line", 0)
                 desc = v.get("description", "")
-                self.findings.insert(tk.END, f"\n[{i}] {t}\n  Field: {field}\n  Description: {desc}\n")
+                snippet = v.get("code_snippet", "")
+
+                self.findings.insert(
+                    tk.END,
+                    f"\n[{i}] {vtype} - {name}\n"
+                    f"  URL: {url}\n"
+                    f"  Line: {line}\n"
+                    f"  Description: {desc}\n"
+                )
+                if snippet:
+                    self.findings.insert(tk.END, f"  Evidence: {snippet}\n")
 
         self.findings.see(tk.END)
 
-    def _render_recommendations(self, output_text, vulns):
-        """
-        Extract the scanner's printed recommendations section (if present),
-        and show it in the bottom-right box.
-        """
+    def _render_recommendations(self, vulns):
         self.recommendations.delete("1.0", tk.END)
-
-        lines = output_text.splitlines()
-        start = None
-        for i, line in enumerate(lines):
-            if "RECOMMENDATIONS" in line:
-                start = i
-                break
-
-        if start is not None:
-            # Keep only the recommendation lines after the header separators
-            # (Your scanner prints numbered items below the RECOMMENDATIONS section.)
-            extracted = "\n".join(lines[start:]).strip()
-            self.recommendations.insert(tk.END, extracted)
-            self.recommendations.see(tk.END)
-            return
-
-        # Fallbacks (in case scanner output format changes)
-        if not vulns:
-            self.recommendations.insert(
-                tk.END,
-                "✅ No issues detected.\n\nKeep these controls in place:\n"
-                "• Server-side validation\n"
-                "• CSRF tokens (and SameSite cookies)\n"
-                "• Safe DOM APIs (textContent) instead of innerHTML\n"
-            )
-        else:
-            self.recommendations.insert(
-                tk.END,
-                "General remediation guidance:\n"
-                "1) Implement server-side validation for all fields\n"
-                "2) Add sanitization / output encoding for user-controlled content\n"
-                "3) Use CSRF tokens + Origin/Referer validation where appropriate\n"
-                "4) Prefer textContent / createTextNode over innerHTML\n"
-                "5) Add strict input constraints (maxlength, patterns, min/max)\n"
-            )
+        self.recommendations.insert(tk.END, build_recommendations(vulns))
+        self.recommendations.see(tk.END)
 
     def export_report(self):
         if not self.last_target:
@@ -423,14 +506,20 @@ class ScannerGUI:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(self.last_output_text)
             else:
-                report = {
-                    "target": self.last_target,
-                    "timestamp": datetime.now().isoformat(),
-                    "risk_level": risk_label_and_color(self.last_vulns)[0],
-                    "findings_count": len(self.last_vulns),
-                    "findings": self.last_vulns,
-                    "raw_output": self.last_output_text,
+                report = self.last_report or {
+                    "scan_info": {
+                        "target": self.last_target,
+                        "scan_time": datetime.now().isoformat()
+                    },
+                    "vulnerabilities": self.last_vulns
                 }
+                # Also include GUI fields for convenience
+                report["_gui"] = {
+                    "risk_level": risk_label_and_color(self.last_vulns)[0],
+                    "findings_count": len(self.last_vulns)
+                }
+                report["_raw_output"] = self.last_output_text
+
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(report, f, indent=2)
 

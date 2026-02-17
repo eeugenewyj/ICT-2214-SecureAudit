@@ -10,12 +10,34 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import sys
+import json
+from pathlib import Path
 
 class WebVulnerabilityScanner:
-    def __init__(self, target_url):
+    def __init__(self, target_url, patterns_path="patterns.json", wordlists_path="wordlists.json"):
         self.target_url = target_url
         self.vulnerabilities = []
         self.forms = []
+
+        # Load patterns + wordlists
+        self.patterns = self._load_json(patterns_path)
+        self.wordlists = self._load_json(wordlists_path)
+
+        # SQLi config
+        self.sqli_patterns = self.patterns.get("sqli_patterns", {})
+        self.sqli_param_hints = set(self.wordlists.get("sqli_param_hints", []))
+        self.sqli_action_hints = tuple(self.wordlists.get("sqli_action_hints", []))
+        self.sqli_error_signatures = self.wordlists.get("sqli_error_signatures", [])
+    
+    def _load_json(self, path):
+        try:
+            p = Path(path)
+            if not p.exists():
+                return {}
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
         
     def fetch_page(self):
         """Fetch the HTML content from target URL"""
@@ -267,6 +289,68 @@ class WebVulnerabilityScanner:
         
         return vulnerabilities
     
+    def check_sqli_patterns(self, html_content):
+        vulnerabilities = []
+
+        for name, cfg in self.sqli_patterns.items():
+            pattern = cfg.get("pattern")
+            if not pattern:
+                continue
+
+            flags = 0
+            for f in cfg.get("flags", []):
+                if f.upper() == "IGNORECASE":
+                    flags |= re.IGNORECASE
+                if f.upper() == "MULTILINE":
+                    flags |= re.MULTILINE
+                if f.upper() == "DOTALL":
+                    flags |= re.DOTALL
+
+            if re.search(pattern, html_content or "", flags):
+                vulnerabilities.append({
+                    "severity": cfg.get("severity", "Low").title(),
+                    "type": f"SQLi Signal - {name}",
+                    "field": "Page",
+                    "description": cfg.get("description", "SQLi-related pattern detected (heuristic)")
+                })
+
+        return vulnerabilities
+    
+    def check_sqli_surface(self, form):
+        vulnerabilities = []
+
+        action = (form.get("action") or "").lower()
+        method = (form.get("method") or "GET").upper()
+
+        inputs = form.find_all(["input", "textarea", "select"])
+        names = [i.get("name", "").lower() for i in inputs if i.get("name")]
+
+        # Param-name heuristic
+        hits = [n for n in names if n in self.sqli_param_hints]
+
+        score = 0
+        reasons = []
+
+        if hits:
+            score += 15
+            reasons.append(f"SQL-shaped input names: {', '.join(hits)}")
+
+        if any(h in action for h in self.sqli_action_hints):
+            score += 10
+            reasons.append("Form action looks DB-backed")
+
+        if score >= 20:
+            vulnerabilities.append({
+                "severity": "Medium",
+                "type": "SQLi Surface (Heuristic)",
+                "field": "Form",
+                "description": " | ".join(reasons)
+            })
+
+        return vulnerabilities
+
+
+    
     def scan(self):
         """Main scanning function"""
         print("\n" + "="*70)
@@ -295,6 +379,7 @@ class WebVulnerabilityScanner:
             all_vulnerabilities.extend(self.check_input_validation(form, soup))
             all_vulnerabilities.extend(self.check_csrf_protection(form))
             all_vulnerabilities.extend(self.check_client_side_validation_only(form))
+            all_vulnerabilities.extend(self.check_sqli_surface(form))
         
         # Check page-wide vulnerabilities
         print(f"\n{'='*70}")
@@ -302,6 +387,8 @@ class WebVulnerabilityScanner:
         print(f"{'='*70}")
         all_vulnerabilities.extend(self.check_xss_vulnerability(html_content, soup))
         all_vulnerabilities.extend(self.check_information_disclosure(html_content, soup))
+        all_vulnerabilities.extend(self.check_sqli_patterns(html_content))
+
         
         # Display results
         self.display_results(all_vulnerabilities)

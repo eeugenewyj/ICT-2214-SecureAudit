@@ -109,4 +109,32 @@
       "description": "Form with target=\"_blank\" may be vulnerable to tabnabbing"
     }
   }
+  ,
+  "sqli_patterns": {
+    "sql_error_keywords_in_response": {
+      "pattern": "\\b(SQL syntax|sqlite3\\.OperationalError|Warning:\\s+mysqli_|mysql_fetch|PG::SyntaxError|PostgreSQL.*ERROR|ORA-\\d{5})\\b",
+      "severity": "HIGH",
+      "description": "Database error keywords found in page content (possible SQLi or error leakage)",
+      "flags": ["IGNORECASE"]
+    },
+    "client_side_sql_keywords": {
+      "pattern": "\\b(SELECT|INSERT|UPDATE|DELETE|UNION|FROM|WHERE|ORDER\\s+BY|GROUP\\s+BY|LIMIT)\\b",
+      "severity": "LOW",
+      "description": "SQL keywords present in HTML/JS (signal only)",
+      "flags": ["IGNORECASE"]
+    },
+    "sql_string_building_signal": {
+      "pattern": "\\b(SELECT|INSERT|UPDATE|DELETE)\\b[^\\n]{0,200}(\\+|\\%s|\\$\\{|\\{\\{)",
+      "severity": "MEDIUM",
+      "description": "SQL-like template appears to be built via concatenation/interpolation (signal)",
+      "flags": ["IGNORECASE"]
+    },
+    "sqli_param_name_signal": {
+      "pattern": "\\b(id|ids|user|username|email|q|query|search|keyword|filter|sort|order|orderby|limit|offset|page)\\b",
+      "severity": "LOW",
+      "description": "Common SQLi-relevant parameter names found (signal)",
+      "flags": ["IGNORECASE"]
+    }
+  }
+
 }

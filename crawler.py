@@ -147,8 +147,8 @@ class VulnerabilityScanner:
         
         return result if result else re.IGNORECASE
 
-    def analyze_html(self, html_content, url):
-        """Analyze HTML content for XSS and CSRF vulnerabilities."""
+    def analyze_html(self, html_content, url, response_text=None):
+        """Analyze HTML content for XSS, CSRF, and SQLi vulnerabilities."""
         findings = []
 
         # Check XSS patterns
@@ -193,14 +193,12 @@ class VulnerabilityScanner:
         for vuln_name, vuln_info in self.sqli_patterns.items():
             flags = self._parse_flags(vuln_info.get('flags'))
             try:
-                # Minimal: dedupe within this page+rule
                 seen_snippets = set()
 
                 matches = re.finditer(vuln_info['pattern'], html_content, flags)
                 for match in matches:
                     snippet = match.group(0)[:100]
 
-                    # Dedupe identical evidence on the same page for the same rule
                     if snippet in seen_snippets:
                         continue
                     seen_snippets.add(snippet)
@@ -218,12 +216,14 @@ class VulnerabilityScanner:
             except re.error as e:
                 print(f"[!] Invalid regex pattern in {vuln_name}: {e}")
 
-
-
         # Additional form analysis using BeautifulSoup
         soup = BeautifulSoup(html_content, 'html.parser')
         findings.extend(self._analyze_forms(soup, url))
         findings.extend(self._analyze_scripts(soup, url))
+
+        # Passive SQLi surface + DB error detection
+        # Pass the raw response_text (if available) so DB errors in JS/comments are caught
+        findings.extend(self.detect_sqli_surface(html_content, url, response_text))
 
         return findings
 
@@ -233,6 +233,144 @@ class VulnerabilityScanner:
         # scheme+host+path + param names (NOT values) + rule name
         return f"{p.scheme}://{p.netloc}{p.path}?{keys}|{rule_name}"
 
+    # ------------------------------------------------------------------
+    # Passive SQLi surface detection
+    # ------------------------------------------------------------------
+    # SQLi cannot be found by scanning static HTML output — the flaw lives
+    # in the server-side code.  What we CAN do passively is identify every
+    # input surface (URL query params, form fields) that accepts user input
+    # and flag it as a potential injection point.  We also check the HTTP
+    # response for database error strings that prove the app is leaking raw
+    # SQL errors back to the browser (a HIGH-confidence indicator).
+    # ------------------------------------------------------------------
+
+    # Regex patterns that match common database error messages in responses
+    _DB_ERROR_PATTERNS = [
+        # MySQL / MariaDB
+        (r"you have an error in your sql syntax", "MySQL syntax error exposed"),
+        (r"warning:\s+mysqli?::", "MySQL warning exposed"),
+        (r"supplied argument is not a valid mysql", "MySQL invalid argument exposed"),
+        (r"mysql_fetch_array\(\)", "MySQL function name exposed"),
+        (r"com\.mysql\.jdbc\.exceptions", "Java MySQL exception exposed"),
+        # MSSQL
+        (r"unclosed quotation mark after the character string", "MSSQL unclosed quote error"),
+        (r"incorrect syntax near", "MSSQL syntax error exposed"),
+        (r"\[Microsoft\]\[ODBC SQL Server Driver\]", "MSSQL ODBC error exposed"),
+        (r"\[SQL Server\]", "SQL Server error tag exposed"),
+        # Oracle
+        (r"ora-\d{5}", "Oracle ORA- error exposed"),
+        (r"oracle error", "Oracle error exposed"),
+        # PostgreSQL
+        (r"pg_query\(\):", "PostgreSQL query error exposed"),
+        (r"pg_exec\(\):", "PostgreSQL exec error exposed"),
+        (r"postgresql.*error", "PostgreSQL error exposed"),
+        # SQLite
+        (r"sqlite_[a-z]+\(\)", "SQLite function error exposed"),
+        (r"sqlite3\.operationalerror", "SQLite3 operational error exposed"),
+        # Generic ODBC / JDBC
+        (r"odbc driver.*sql", "ODBC SQL error exposed"),
+        (r"jdbc.*sql.*exception", "JDBC SQL exception exposed"),
+        # Generic
+        (r"sql syntax.*mysql", "Generic SQL syntax error"),
+        (r"division by zero in sql", "SQL division by zero"),
+    ]
+
+    # Input field name patterns that strongly suggest database lookups
+    _DB_PARAM_NAMES = re.compile(
+        r'\b(id|user_?id|product_?id|item_?id|order_?id|cat(?:egory)?_?id|'
+        r'user(?:name)?|login|email|search|q|query|keyword|name|'
+        r'page|sort|order|filter|category|type|key|ref)\b',
+        re.IGNORECASE
+    )
+
+    def detect_sqli_surface(self, html_content: str, url: str, response_text: str = None) -> list:
+        """
+        Passive SQLi detection via three complementary signals:
+
+        1. URL query parameters that look like DB identifiers (e.g. ?id=1)
+        2. HTML form fields whose names suggest DB lookups
+        3. Database error strings leaked into the HTTP response body
+        """
+        findings = []
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # ── 1. URL query parameter inspection ────────────────────────────
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        for param_name in params:
+            if self._DB_PARAM_NAMES.search(param_name):
+                dedup_key = self._sqli_dedupe_key(url, f"url_param:{param_name}")
+                if dedup_key not in self._seen_sqli:
+                    self._seen_sqli.add(dedup_key)
+                    findings.append({
+                        'type': 'SQLI',
+                        'name': 'sqli_suspect_url_parameter',
+                        'severity': 'MEDIUM',
+                        'description': (
+                            f'URL parameter "{param_name}" is a common SQL injection vector. '
+                            f'Verify server-side input is parameterised.'
+                        ),
+                        'url': url,
+                        'line': 0,
+                        'code_snippet': f'GET param: {param_name}={params[param_name][0][:40]}'
+                    })
+
+        # ── 2. Form field inspection ──────────────────────────────────────
+        for form in soup.find_all('form'):
+            action = form.get('action', url)
+            full_action = urljoin(url, action) if action else url
+            method = form.get('method', 'get').upper()
+            for field in form.find_all(['input', 'textarea', 'select']):
+                field_name = field.get('name', '')
+                field_type = field.get('type', 'text').lower()
+                # Skip hidden/submit/button/checkbox/radio – not free-text
+                if field_type in ('hidden', 'submit', 'button', 'checkbox', 'radio', 'image', 'reset'):
+                    continue
+                if field_name and self._DB_PARAM_NAMES.search(field_name):
+                    dedup_key = self._sqli_dedupe_key(
+                        full_action, f"form_field:{field_name}"
+                    )
+                    if dedup_key not in self._seen_sqli:
+                        self._seen_sqli.add(dedup_key)
+                        findings.append({
+                            'type': 'SQLI',
+                            'name': 'sqli_suspect_form_field',
+                            'severity': 'MEDIUM',
+                            'description': (
+                                f'Form field "{field_name}" ({method} → {full_action}) '
+                                f'is a common SQL injection vector. '
+                                f'Verify server-side input is parameterised.'
+                            ),
+                            'url': url,
+                            'line': 0,
+                            'code_snippet': f'{method} field: {field_name}'
+                        })
+
+        # ── 3. Database error string detection (HIGH confidence) ─────────
+        # Scan the raw response text (not just the parsed HTML) so we catch
+        # errors that appear in JS strings, HTML comments, or plain text.
+        body_to_scan = response_text if response_text else html_content
+        for pattern, description in self._DB_ERROR_PATTERNS:
+            match = re.search(pattern, body_to_scan, re.IGNORECASE)
+            if match:
+                dedup_key = self._sqli_dedupe_key(url, f"db_error:{pattern[:20]}")
+                if dedup_key not in self._seen_sqli:
+                    self._seen_sqli.add(dedup_key)
+                    findings.append({
+                        'type': 'SQLI',
+                        'name': 'sqli_database_error_in_response',
+                        'severity': 'HIGH',
+                        'description': (
+                            f'{description} — raw database error returned to browser. '
+                            f'This is a strong indicator of SQL injection vulnerability.'
+                        ),
+                        'url': url,
+                        'line': 0,
+                        'code_snippet': match.group(0)[:120]
+                    })
+                break  # one error per page is enough
+
+        return findings
 
     def _analyze_forms(self, soup, url):
         """Detailed form analysis for CSRF vulnerabilities."""
@@ -572,7 +710,7 @@ class HTMLCrawler:
         self.all_vulnerabilities.extend(header_findings)
 
         # Analyze page for vulnerabilities
-        vulnerabilities = self.scanner.analyze_html(response.text, url)
+        vulnerabilities = self.scanner.analyze_html(response.text, url, response_text=response.text)
         self.all_vulnerabilities.extend(vulnerabilities)
 
         # Analyze page for third-party libraries and insecure dependencies

@@ -306,6 +306,242 @@ class WebVulnerabilityScanner:
         # Display results
         self.display_results(all_vulnerabilities)
     
+    def get_specific_recommendations(self, vulnerabilities):
+        """Generate specific, actionable recommendations based on detected vulnerabilities."""
+        REMEDIATION_MAP = {
+            'XSS Vulnerability - innerHTML': {
+                'title': 'Fix Unsafe innerHTML Usage',
+                'steps': [
+                    "Replace `element.innerHTML = userInput` with `element.textContent = userInput`",
+                    "If HTML rendering is needed, sanitize first:\n         element.innerHTML = DOMPurify.sanitize(userInput);  // https://github.com/cure53/DOMPurify",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         output.innerHTML = document.getElementById('name').value;\n\n"
+                    "         // SAFE (plain text):\n"
+                    "         output.textContent = document.getElementById('name').value;\n\n"
+                    "         // SAFE (HTML allowed):\n"
+                    "         output.innerHTML = DOMPurify.sanitize(document.getElementById('name').value);"
+                )
+            },
+            'XSS Vulnerability - Template Literal Injection': {
+                'title': 'Fix Template Literal XSS in innerHTML',
+                'steps': [
+                    "Never interpolate user values directly into innerHTML template literals",
+                    "Build DOM nodes with createElement + textContent instead of HTML strings",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         container.innerHTML = `<p>Hello ${nameInput.value}</p>`;\n\n"
+                    "         // SAFE:\n"
+                    "         const p = document.createElement('p');\n"
+                    "         p.textContent = `Hello ${nameInput.value}`;\n"
+                    "         container.appendChild(p);"
+                )
+            },
+            'Code Injection - eval()': {
+                'title': 'Remove eval() — High Risk of Arbitrary Code Execution',
+                'steps': [
+                    "Delete all eval() calls — there is almost never a valid use case",
+                    "For math expressions, use a safe parser such as mathjs (https://mathjs.org)",
+                    "Add Content-Security-Policy header without 'unsafe-eval' to block it at browser level",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         eval('result = ' + userInput);\n\n"
+                    "         // SAFE (math):\n"
+                    "         import { evaluate } from 'mathjs';\n"
+                    "         const result = evaluate(userInput);"
+                )
+            },
+            'XSS Vulnerability - document.write': {
+                'title': 'Replace document.write() with Safe DOM Methods',
+                'steps': [
+                    "Remove all document.write() calls",
+                    "Use createElement / textContent / appendChild to inject content safely",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         document.write('<p>' + userInput + '</p>');\n\n"
+                    "         // SAFE:\n"
+                    "         const p = document.createElement('p');\n"
+                    "         p.textContent = userInput;\n"
+                    "         document.body.appendChild(p);"
+                )
+            },
+            'Missing CSRF Protection': {
+                'title': 'Add CSRF Token to Every POST Form',
+                'steps': [
+                    "Generate a cryptographically random token server-side per session",
+                    "Embed it as a hidden field: <input type=\"hidden\" name=\"csrf_token\" value=\"{{ token }}\">",
+                    "Reject any POST request where the submitted token does not match the session token",
+                    "Set session cookie with SameSite=Strict or Lax as an additional defence layer",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <form method=\"POST\" action=\"/submit\"> ... </form>\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <form method=\"POST\" action=\"/submit\">\n"
+                    "           <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf_token }}\">\n"
+                    "           ...\n"
+                    "         </form>"
+                )
+            },
+            'Client-Side Only Validation': {
+                'title': 'Add a Real Server-Side Validation Endpoint',
+                'steps': [
+                    "Set a real server URL in the form action attribute (not '#' or empty)",
+                    "Re-validate and sanitize ALL fields on the server — JS checks can be disabled",
+                    "Return structured error responses from the server (do not rely solely on JS alerts)",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <form action=\"#\" onsubmit=\"return validate()\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <form action=\"/api/submit\" method=\"POST\">\n"
+                    "           <!-- server validates independently of any client-side JS -->"
+                )
+            },
+            'Missing Required Validation': {
+                'title': 'Mark Mandatory Fields as Required',
+                'steps': [
+                    "Add the `required` attribute to every field that must not be empty",
+                    "Also enforce presence server-side — the HTML attribute can be stripped by attackers",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <input type=\"text\" name=\"username\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <input type=\"text\" name=\"username\" required>"
+                )
+            },
+            'Missing Email Validation': {
+                'title': 'Enforce Email Format Validation',
+                'steps': [
+                    "Add a pattern attribute with an email regex to the input element",
+                    "Validate email format server-side using a trusted library",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <input type=\"email\" name=\"email\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <input type=\"email\" name=\"email\" required\n"
+                    "                pattern=\"[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\">"
+                )
+            },
+            'Missing Phone Validation': {
+                'title': 'Add Phone Number Pattern Constraint',
+                'steps': [
+                    "Add a pattern attribute matching your expected phone number format",
+                    "Include a title attribute so the browser can show the user a helpful error",
+                    "Strip or reject unexpected characters on the server before storing the value",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <input type=\"tel\" name=\"phone\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <input type=\"tel\" name=\"phone\" required\n"
+                    "                pattern=\"[0-9]{8,15}\" title=\"8 to 15 digit phone number\">"
+                )
+            },
+            'Missing Number Range Validation': {
+                'title': 'Constrain Number Fields with min and max',
+                'steps': [
+                    "Add min and max attributes to the number input",
+                    "Re-enforce the range server-side — HTML attributes are client-only",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <input type=\"number\" name=\"age\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <input type=\"number\" name=\"age\" min=\"1\" max=\"120\" required>"
+                )
+            },
+            'Missing Length Limit': {
+                'title': 'Restrict Maximum Input Length',
+                'steps': [
+                    "Add the maxlength attribute to all text, email, and tel inputs",
+                    "Enforce the same limit server-side before storing data to the database",
+                ],
+                'example': (
+                    "<!-- VULNERABLE: -->\n"
+                    "         <input type=\"text\" name=\"username\">\n\n"
+                    "         <!-- SAFE: -->\n"
+                    "         <input type=\"text\" name=\"username\" maxlength=\"50\" required>"
+                )
+            },
+            'Information Disclosure': {
+                'title': 'Remove Sensitive Data from console.log / alert',
+                'steps': [
+                    "Remove all console.log / console.debug calls that print passwords, tokens, or PII",
+                    "Use a build tool (e.g. terser --drop-console) to strip logs automatically in production",
+                    "Never log sensitive form values client-side — use server-side structured logging instead",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         console.log('Password:', passwordField.value);\n\n"
+                    "         // SAFE:\n"
+                    "         // Remove the log, or guard it:\n"
+                    "         if (process.env.NODE_ENV !== 'production') console.log('Form submitted');"
+                )
+            },
+            'Information Disclosure - Alert': {
+                'title': 'Do Not Display Sensitive Values in alert()',
+                'steps': [
+                    "Replace alert() calls that expose token/password values with a generic user message",
+                    "Log diagnostic details server-side where users cannot access them",
+                ],
+                'example': (
+                    "// VULNERABLE:\n"
+                    "         alert('Your token: ' + token);\n\n"
+                    "         // SAFE:\n"
+                    "         alert('Action completed successfully.');"
+                )
+            },
+        }
+
+        recommendations = []
+        seen_titles = set()
+
+        for vuln in vulnerabilities:
+            vuln_type = vuln['type']
+            field = vuln['field']
+
+            entry = REMEDIATION_MAP.get(vuln_type)
+            if not entry:
+                for key, val in REMEDIATION_MAP.items():
+                    if key.lower() in vuln_type.lower() or vuln_type.lower() in key.lower():
+                        entry = val
+                        break
+
+            if entry:
+                title = entry['title']
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                recommendations.append({
+                    'title': title,
+                    'affected_field': field,
+                    'steps': entry['steps'],
+                    'example': entry['example'],
+                })
+            else:
+                title = f"Fix: {vuln_type}"
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    recommendations.append({
+                        'title': title,
+                        'affected_field': field,
+                        'steps': [
+                            f"Review '{field}' for: {vuln['description']}",
+                            "Validate and sanitize all user-supplied input before use",
+                        ],
+                        'example': None,
+                    })
+
+        return recommendations
+
+
     def display_results(self, vulnerabilities):
         """Display vulnerability report"""
         print("\n" + "="*70)
@@ -353,18 +589,25 @@ class WebVulnerabilityScanner:
                     print(f"    Field: {vuln['field']}")
                     print(f"    Description: {vuln['description']}")
         
-        # Provide recommendations
+        # Provide specific, actionable recommendations based on actual findings
+        recommendations = self.get_specific_recommendations(vulnerabilities)
+
         print(f"\n{'='*70}")
-        print("  RECOMMENDATIONS")
+        print("  REMEDIATION RECOMMENDATIONS")
         print(f"{'='*70}")
-        print("\n1. Implement server-side validation for all input fields")
-        print("2. Add input sanitization to prevent XSS attacks")
-        print("3. Use parameterized queries to prevent SQL injection")
-        print("4. Implement CSRF token protection")
-        print("5. Add proper input validation (regex patterns, min/max values)")
-        print("6. Remove console.log statements with sensitive data")
-        print("7. Use textContent instead of innerHTML when possible")
-        print("8. Implement Content Security Policy (CSP) headers")
+        print(f"  {len(recommendations)} specific fix(es) required based on the findings above\n")
+
+        for idx, rec in enumerate(recommendations, 1):
+            print(f"  [{idx}] {rec['title']}")
+            print(f"       Affected: {rec['affected_field']}")
+            print(f"       Steps:")
+            for step_num, step in enumerate(rec['steps'], 1):
+                print(f"         {step_num}. {step}")
+            if rec['example']:
+                print(f"       Example:")
+                for line in rec['example'].splitlines():
+                    print(f"         {line}")
+            print()
 
 def main():
     print("\n" + "="*70)

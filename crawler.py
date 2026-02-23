@@ -12,7 +12,7 @@ import re
 import argparse
 import json
 import urllib3
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from datetime import datetime
 from collections import deque
@@ -39,6 +39,8 @@ class VulnerabilityScanner:
         self.vulnerabilities = []
         self.xss_patterns = {}
         self.csrf_patterns = {}
+        self.sqli_patterns = {}
+        self._seen_sqli = set()
         
         if patterns_file and os.path.exists(patterns_file):
             self.load_patterns_from_file(patterns_file)
@@ -58,8 +60,9 @@ class VulnerabilityScanner:
             
             self.xss_patterns = data.get('xss_patterns', {})
             self.csrf_patterns = data.get('csrf_patterns', {})
+            self.sqli_patterns = data.get('sqli_patterns', {})
             
-            print(f"[+] Loaded {len(self.xss_patterns)} XSS patterns and {len(self.csrf_patterns)} CSRF patterns from {filepath}")
+            print(f"[+] Loaded {len(self.xss_patterns)} XSS, {len(self.csrf_patterns)} CSRF, {len(self.sqli_patterns)} SQLi patterns from {filepath}")
         except Exception as e:
             print(f"[!] Error loading patterns from {filepath}: {e}")
             sys.exit(1)
@@ -144,8 +147,8 @@ class VulnerabilityScanner:
         
         return result if result else re.IGNORECASE
 
-    def analyze_html(self, html_content, url):
-        """Analyze HTML content for XSS and CSRF vulnerabilities."""
+    def analyze_html(self, html_content, url, response_text=None):
+        """Analyze HTML content for XSS, CSRF, and SQLi vulnerabilities."""
         findings = []
 
         # Check XSS patterns
@@ -186,10 +189,186 @@ class VulnerabilityScanner:
             except re.error as e:
                 print(f"[!] Invalid regex pattern in {vuln_name}: {e}")
 
+        # Check SQLi patterns (deduped)
+        for vuln_name, vuln_info in self.sqli_patterns.items():
+            flags = self._parse_flags(vuln_info.get('flags'))
+            try:
+                seen_snippets = set()
+
+                matches = re.finditer(vuln_info['pattern'], html_content, flags)
+                for match in matches:
+                    snippet = match.group(0)[:100]
+
+                    if snippet in seen_snippets:
+                        continue
+                    seen_snippets.add(snippet)
+
+                    line_num = html_content[:match.start()].count('\n') + 1
+                    findings.append({
+                        'type': 'SQLI',
+                        'name': vuln_name,
+                        'severity': vuln_info['severity'],
+                        'description': vuln_info['description'],
+                        'url': url,
+                        'line': line_num,
+                        'code_snippet': snippet
+                    })
+            except re.error as e:
+                print(f"[!] Invalid regex pattern in {vuln_name}: {e}")
+
         # Additional form analysis using BeautifulSoup
         soup = BeautifulSoup(html_content, 'html.parser')
         findings.extend(self._analyze_forms(soup, url))
         findings.extend(self._analyze_scripts(soup, url))
+
+        # Passive SQLi surface + DB error detection
+        # Pass the raw response_text (if available) so DB errors in JS/comments are caught
+        findings.extend(self.detect_sqli_surface(html_content, url, response_text))
+
+        return findings
+
+    def _sqli_dedupe_key(self, url: str, rule_name: str) -> str:
+        p = urlparse(url)
+        keys = ",".join(sorted(parse_qs(p.query).keys()))
+        # scheme+host+path + param names (NOT values) + rule name
+        return f"{p.scheme}://{p.netloc}{p.path}?{keys}|{rule_name}"
+
+    # ------------------------------------------------------------------
+    # Passive SQLi surface detection
+    # ------------------------------------------------------------------
+    # SQLi cannot be found by scanning static HTML output — the flaw lives
+    # in the server-side code.  What we CAN do passively is identify every
+    # input surface (URL query params, form fields) that accepts user input
+    # and flag it as a potential injection point.  We also check the HTTP
+    # response for database error strings that prove the app is leaking raw
+    # SQL errors back to the browser (a HIGH-confidence indicator).
+    # ------------------------------------------------------------------
+
+    # Regex patterns that match common database error messages in responses
+    _DB_ERROR_PATTERNS = [
+        # MySQL / MariaDB
+        (r"you have an error in your sql syntax", "MySQL syntax error exposed"),
+        (r"warning:\s+mysqli?::", "MySQL warning exposed"),
+        (r"supplied argument is not a valid mysql", "MySQL invalid argument exposed"),
+        (r"mysql_fetch_array\(\)", "MySQL function name exposed"),
+        (r"com\.mysql\.jdbc\.exceptions", "Java MySQL exception exposed"),
+        # MSSQL
+        (r"unclosed quotation mark after the character string", "MSSQL unclosed quote error"),
+        (r"incorrect syntax near", "MSSQL syntax error exposed"),
+        (r"\[Microsoft\]\[ODBC SQL Server Driver\]", "MSSQL ODBC error exposed"),
+        (r"\[SQL Server\]", "SQL Server error tag exposed"),
+        # Oracle
+        (r"ora-\d{5}", "Oracle ORA- error exposed"),
+        (r"oracle error", "Oracle error exposed"),
+        # PostgreSQL
+        (r"pg_query\(\):", "PostgreSQL query error exposed"),
+        (r"pg_exec\(\):", "PostgreSQL exec error exposed"),
+        (r"postgresql.*error", "PostgreSQL error exposed"),
+        # SQLite
+        (r"sqlite_[a-z]+\(\)", "SQLite function error exposed"),
+        (r"sqlite3\.operationalerror", "SQLite3 operational error exposed"),
+        # Generic ODBC / JDBC
+        (r"odbc driver.*sql", "ODBC SQL error exposed"),
+        (r"jdbc.*sql.*exception", "JDBC SQL exception exposed"),
+        # Generic
+        (r"sql syntax.*mysql", "Generic SQL syntax error"),
+        (r"division by zero in sql", "SQL division by zero"),
+    ]
+
+    # Input field name patterns that strongly suggest database lookups
+    _DB_PARAM_NAMES = re.compile(
+        r'\b(id|user_?id|product_?id|item_?id|order_?id|cat(?:egory)?_?id|'
+        r'user(?:name)?|login|email|search|q|query|keyword|name|'
+        r'page|sort|order|filter|category|type|key|ref)\b',
+        re.IGNORECASE
+    )
+
+    def detect_sqli_surface(self, html_content: str, url: str, response_text: str = None) -> list:
+        """
+        Passive SQLi detection via three complementary signals:
+
+        1. URL query parameters that look like DB identifiers (e.g. ?id=1)
+        2. HTML form fields whose names suggest DB lookups
+        3. Database error strings leaked into the HTTP response body
+        """
+        findings = []
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # ── 1. URL query parameter inspection ────────────────────────────
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        for param_name in params:
+            if self._DB_PARAM_NAMES.search(param_name):
+                dedup_key = self._sqli_dedupe_key(url, f"url_param:{param_name}")
+                if dedup_key not in self._seen_sqli:
+                    self._seen_sqli.add(dedup_key)
+                    findings.append({
+                        'type': 'SQLI',
+                        'name': 'sqli_suspect_url_parameter',
+                        'severity': 'MEDIUM',
+                        'description': (
+                            f'URL parameter "{param_name}" is a common SQL injection vector. '
+                            f'Verify server-side input is parameterised.'
+                        ),
+                        'url': url,
+                        'line': 0,
+                        'code_snippet': f'GET param: {param_name}={params[param_name][0][:40]}'
+                    })
+
+        # ── 2. Form field inspection ──────────────────────────────────────
+        for form in soup.find_all('form'):
+            action = form.get('action', url)
+            full_action = urljoin(url, action) if action else url
+            method = form.get('method', 'get').upper()
+            for field in form.find_all(['input', 'textarea', 'select']):
+                field_name = field.get('name', '')
+                field_type = field.get('type', 'text').lower()
+                # Skip hidden/submit/button/checkbox/radio – not free-text
+                if field_type in ('hidden', 'submit', 'button', 'checkbox', 'radio', 'image', 'reset'):
+                    continue
+                if field_name and self._DB_PARAM_NAMES.search(field_name):
+                    dedup_key = self._sqli_dedupe_key(
+                        full_action, f"form_field:{field_name}"
+                    )
+                    if dedup_key not in self._seen_sqli:
+                        self._seen_sqli.add(dedup_key)
+                        findings.append({
+                            'type': 'SQLI',
+                            'name': 'sqli_suspect_form_field',
+                            'severity': 'MEDIUM',
+                            'description': (
+                                f'Form field "{field_name}" ({method} → {full_action}) '
+                                f'is a common SQL injection vector. '
+                                f'Verify server-side input is parameterised.'
+                            ),
+                            'url': url,
+                            'line': 0,
+                            'code_snippet': f'{method} field: {field_name}'
+                        })
+
+        # ── 3. Database error string detection (HIGH confidence) ─────────
+        # Scan the raw response text (not just the parsed HTML) so we catch
+        # errors that appear in JS strings, HTML comments, or plain text.
+        body_to_scan = response_text if response_text else html_content
+        for pattern, description in self._DB_ERROR_PATTERNS:
+            match = re.search(pattern, body_to_scan, re.IGNORECASE)
+            if match:
+                dedup_key = self._sqli_dedupe_key(url, f"db_error:{pattern[:20]}")
+                if dedup_key not in self._seen_sqli:
+                    self._seen_sqli.add(dedup_key)
+                    findings.append({
+                        'type': 'SQLI',
+                        'name': 'sqli_database_error_in_response',
+                        'severity': 'HIGH',
+                        'description': (
+                            f'{description} — raw database error returned to browser. '
+                            f'This is a strong indicator of SQL injection vulnerability.'
+                        ),
+                        'url': url,
+                        'line': 0,
+                        'code_snippet': match.group(0)[:120]
+                    })
+                break  # one error per page is enough
 
         return findings
 
@@ -531,7 +710,7 @@ class HTMLCrawler:
         self.all_vulnerabilities.extend(header_findings)
 
         # Analyze page for vulnerabilities
-        vulnerabilities = self.scanner.analyze_html(response.text, url)
+        vulnerabilities = self.scanner.analyze_html(response.text, url, response_text=response.text)
         self.all_vulnerabilities.extend(vulnerabilities)
 
         # Analyze page for third-party libraries and insecure dependencies
@@ -596,6 +775,7 @@ class HTMLCrawler:
                 'low': len([v for v in self.all_vulnerabilities if v['severity'] == 'LOW']),
                 'xss_count': len([v for v in self.all_vulnerabilities if v['type'] == 'XSS']),
                 'csrf_count': len([v for v in self.all_vulnerabilities if v['type'] == 'CSRF']),
+                'sqli_count': len([v for v in self.all_vulnerabilities if v['type'] == 'SQLI']),
                 'cookie_issues': len([v for v in self.all_vulnerabilities if v['type'] == 'COOKIE_SECURITY'])
             },
             'discovered_urls': list(self.discovered_urls),
@@ -608,6 +788,378 @@ class HTMLCrawler:
             print(f"\n[+] Report saved to {output_file}")
 
         return report
+
+    def get_specific_recommendations(self, vulnerabilities):
+        """Generate specific, actionable recommendations based on detected vulnerability types."""
+
+        REMEDIATION_MAP = {
+            'XSS': {
+                'innerHTML_assignment': {
+                    'title': 'Fix Unsafe innerHTML Usage',
+                    'steps': [
+                        "Replace element.innerHTML = userInput with element.textContent = userInput",
+                        "If HTML rendering is needed, sanitize first:\n         element.innerHTML = DOMPurify.sanitize(userInput);  // https://github.com/cure53/DOMPurify",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         output.innerHTML = userInput;\n\n"
+                        "         // SAFE (plain text):\n"
+                        "         output.textContent = userInput;\n\n"
+                        "         // SAFE (HTML allowed):\n"
+                        "         output.innerHTML = DOMPurify.sanitize(userInput);"
+                    )
+                },
+                'eval_usage': {
+                    'title': 'Remove eval() — Arbitrary Code Execution Risk',
+                    'steps': [
+                        "Delete all eval() calls — there is almost never a valid use case",
+                        "For math expressions use a safe parser e.g. mathjs (https://mathjs.org)",
+                        "Add Content-Security-Policy without 'unsafe-eval' to block it at browser level",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         eval('result = ' + userInput);\n\n"
+                        "         // SAFE:\n"
+                        "         import { evaluate } from 'mathjs';\n"
+                        "         const result = evaluate(userInput);"
+                    )
+                },
+                'document_write': {
+                    'title': 'Replace document.write() with Safe DOM Methods',
+                    'steps': [
+                        "Remove all document.write() calls",
+                        "Use createElement / textContent / appendChild instead",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         document.write('<p>' + userInput + '</p>');\n\n"
+                        "         // SAFE:\n"
+                        "         const p = document.createElement('p');\n"
+                        "         p.textContent = userInput;\n"
+                        "         document.body.appendChild(p);"
+                    )
+                },
+                'innerhtml_url_param': {
+                    'title': 'Fix innerHTML with URL Parameter — Direct XSS Vector',
+                    'steps': [
+                        "Never pass URL parameters directly into innerHTML",
+                        "Validate and whitelist URL parameter values server-side before use",
+                        "Use textContent or DOMPurify.sanitize() if rendering is required",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         el.innerHTML = new URLSearchParams(location.search).get('msg');\n\n"
+                        "         // SAFE:\n"
+                        "         el.textContent = new URLSearchParams(location.search).get('msg');"
+                    )
+                },
+                'outerhtml_assignment': {
+                    'title': 'Fix Unsafe outerHTML Usage',
+                    'steps': [
+                        "Avoid outerHTML assignments with user-controlled data",
+                        "Rebuild the element safely using createElement and textContent",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         element.outerHTML = userInput;\n\n"
+                        "         // SAFE:\n"
+                        "         const newEl = document.createElement('div');\n"
+                        "         newEl.textContent = userInput;\n"
+                        "         element.replaceWith(newEl);"
+                    )
+                },
+                'reflected_param_usage': {
+                    'title': 'Fix Reflected URL Parameter in DOM — Critical XSS',
+                    'steps': [
+                        "Never reflect URL query/hash parameters directly into the DOM",
+                        "Encode output with textContent or DOMPurify before insertion",
+                        "Implement a strict Content-Security-Policy header",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         document.getElementById('msg').innerHTML = location.search;\n\n"
+                        "         // SAFE:\n"
+                        "         const val = new URLSearchParams(location.search).get('msg') || '';\n"
+                        "         document.getElementById('msg').textContent = val;"
+                    )
+                },
+                'template_literal_html': {
+                    'title': 'Fix Template Literal XSS in innerHTML',
+                    'steps': [
+                        "Never interpolate user values directly into innerHTML template literals",
+                        "Build DOM nodes with createElement + textContent instead of HTML strings",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         container.innerHTML = `<p>Hello ${userInput}</p>`;\n\n"
+                        "         // SAFE:\n"
+                        "         const p = document.createElement('p');\n"
+                        "         p.textContent = `Hello ${userInput}`;\n"
+                        "         container.appendChild(p);"
+                    )
+                },
+                # inline script generic fallback
+                'inline_script': {
+                    'title': 'Fix Unsafe Inline Script DOM Manipulation',
+                    'steps': [
+                        "Audit all inline scripts for innerHTML, outerHTML, eval(), document.write()",
+                        "Replace with safe DOM APIs (textContent, createElement, appendChild)",
+                        "Add a Content-Security-Policy header to restrict inline script execution",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         el.innerHTML = someVariable;\n\n"
+                        "         // SAFE:\n"
+                        "         el.textContent = someVariable;"
+                    )
+                },
+            },
+            'CSRF': {
+                'form_missing_csrf_token': {
+                    'title': 'Add CSRF Token to Every POST Form',
+                    'steps': [
+                        "Generate a cryptographically random token server-side per session",
+                        "Embed it as a hidden field: <input type=\"hidden\" name=\"csrf_token\" value=\"{{ token }}\">",
+                        "Reject any POST request where the submitted token does not match the session token",
+                        "Set session cookie with SameSite=Strict or Lax as an additional layer",
+                    ],
+                    'example': (
+                        "<!-- VULNERABLE: -->\n"
+                        "         <form method=\"POST\" action=\"/submit\"> ... </form>\n\n"
+                        "         <!-- SAFE: -->\n"
+                        "         <form method=\"POST\" action=\"/submit\">\n"
+                        "           <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf_token }}\">\n"
+                        "         </form>"
+                    )
+                },
+                'form_no_csrf_token': {
+                    'title': 'Add CSRF Token to Every POST Form',
+                    'steps': [
+                        "Generate a cryptographically random token server-side per session",
+                        "Embed it as a hidden field in every POST form",
+                        "Validate the token server-side before processing any state-changing request",
+                    ],
+                    'example': (
+                        "<!-- VULNERABLE: -->\n"
+                        "         <form method=\"POST\"> ... </form>\n\n"
+                        "         <!-- SAFE: -->\n"
+                        "         <form method=\"POST\">\n"
+                        "           <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf_token }}\">\n"
+                        "         </form>"
+                    )
+                },
+                'state_change_get': {
+                    'title': 'Move State-Changing Actions from GET to POST',
+                    'steps': [
+                        "Never perform delete/update/edit actions via GET request or plain <a href>",
+                        "Use a POST form or fetch(method: 'POST') with a CSRF token instead",
+                        "GET requests must be idempotent and read-only",
+                    ],
+                    'example': (
+                        "<!-- VULNERABLE: -->\n"
+                        "         <a href=\"/user/delete?id=1\">Delete</a>\n\n"
+                        "         <!-- SAFE: -->\n"
+                        "         <form method=\"POST\" action=\"/user/delete\">\n"
+                        "           <input type=\"hidden\" name=\"id\" value=\"1\">\n"
+                        "           <input type=\"hidden\" name=\"csrf_token\" value=\"{{ token }}\">\n"
+                        "           <button type=\"submit\">Delete</button>\n"
+                        "         </form>"
+                    )
+                },
+                'auto_submit_form': {
+                    'title': 'Remove Auto-Submitting Form',
+                    'steps': [
+                        "Remove onload/setTimeout/.submit() patterns — these are a classic CSRF attack vector",
+                        "Forms should only submit on explicit user interaction",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         setTimeout(() => document.getElementById('form').submit(), 1000);\n\n"
+                        "         // SAFE:\n"
+                        "         // Only submit on user click — remove the auto-submit entirely"
+                    )
+                },
+                'missing_samesite': {
+                    'title': 'Add SameSite Attribute to Cookies',
+                    'steps': [
+                        "Set SameSite=Lax (default) or SameSite=Strict on all session cookies",
+                        "Also set Secure and HttpOnly flags on session cookies",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         document.cookie = 'session=abc123; path=/';\n\n"
+                        "         // SAFE:\n"
+                        "         // Set server-side with all flags:\n"
+                        "         Set-Cookie: session=abc123; Path=/; Secure; HttpOnly; SameSite=Lax"
+                    )
+                },
+                'form_external_action': {
+                    'title': 'Fix Form Submitting to External Domain',
+                    'steps': [
+                        "Forms should submit to your own domain, not external URLs",
+                        "If cross-domain submission is required, validate the target server-side",
+                    ],
+                    'example': (
+                        "<!-- VULNERABLE: -->\n"
+                        "         <form action=\"https://attacker.com/collect\">\n\n"
+                        "         <!-- SAFE: -->\n"
+                        "         <form action=\"/api/submit\">"
+                    )
+                },
+            },
+            'SQLI': {
+                'sqli_suspect_url_parameter': {
+                    'title': 'Protect URL Parameters Against SQL Injection',
+                    'steps': [
+                        "Use parameterized queries / prepared statements for all DB queries",
+                        "Never concatenate URL parameter values directly into SQL strings",
+                        "Validate and whitelist parameter types (e.g. enforce integer for id)",
+                    ],
+                    'example': (
+                        "// VULNERABLE (PHP example):\n"
+                        "         $q = \"SELECT * FROM users WHERE id = \" . $_GET['id'];\n\n"
+                        "         // SAFE:\n"
+                        "         $stmt = $pdo->prepare('SELECT * FROM users WHERE id = ?');\n"
+                        "         $stmt->execute([$_GET['id']]);"
+                    )
+                },
+                'sqli_suspect_form_field': {
+                    'title': 'Protect Form Fields Against SQL Injection',
+                    'steps': [
+                        "Use parameterized queries for every form field that touches the database",
+                        "Validate input type and length server-side before using in any query",
+                        "Apply least-privilege DB accounts — app user should not have DROP/ALTER rights",
+                    ],
+                    'example': (
+                        "// VULNERABLE:\n"
+                        "         $q = \"SELECT * FROM users WHERE username = '\" . $_POST['username'] . \"'\";\n\n"
+                        "         // SAFE:\n"
+                        "         $stmt = $pdo->prepare('SELECT * FROM users WHERE username = ?');\n"
+                        "         $stmt->execute([$_POST['username']]);"
+                    )
+                },
+                'sqli_database_error_in_response': {
+                    'title': 'Fix Database Error Leakage in HTTP Response — HIGH Risk',
+                    'steps': [
+                        "Disable verbose DB error output in production (e.g. display_errors=Off in PHP)",
+                        "Log errors server-side only — never return raw SQL errors to the browser",
+                        "Use a generic error page for all unhandled exceptions",
+                        "Immediately audit the endpoint for SQL injection using the error as a lead",
+                    ],
+                    'example': (
+                        "// VULNERABLE (PHP):\n"
+                        "         $result = mysqli_query($conn, $sql) or die(mysqli_error($conn));\n\n"
+                        "         // SAFE:\n"
+                        "         $result = mysqli_query($conn, $sql);\n"
+                        "         if (!$result) {\n"
+                        "             error_log(mysqli_error($conn));  // log only\n"
+                        "             http_response_code(500);\n"
+                        "             die('An error occurred.');\n"
+                        "         }"
+                    )
+                },
+            },
+            'SECURITY_HEADER': {
+                'default': {
+                    'title': 'Add Missing Security Headers',
+                    'steps': [
+                        "Add Content-Security-Policy to restrict script/style sources",
+                        "Add X-Frame-Options: DENY to prevent clickjacking",
+                        "Add X-Content-Type-Options: nosniff to prevent MIME sniffing",
+                        "Add Strict-Transport-Security if you enforce HTTPS",
+                        "Add Referrer-Policy: strict-origin-when-cross-origin",
+                    ],
+                    'example': (
+                        "# Nginx example:\n"
+                        "         add_header Content-Security-Policy \"default-src 'self'\";\n"
+                        "         add_header X-Frame-Options DENY;\n"
+                        "         add_header X-Content-Type-Options nosniff;\n"
+                        "         add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\";\n"
+                        "         add_header Referrer-Policy strict-origin-when-cross-origin;"
+                    )
+                }
+            },
+            'COOKIE_SECURITY': {
+                'default': {
+                    'title': 'Harden Cookie Security Flags',
+                    'steps': [
+                        "Set Secure flag — cookie only sent over HTTPS",
+                        "Set HttpOnly flag — prevents JavaScript access to cookie",
+                        "Set SameSite=Lax or Strict — prevents cross-site request sending",
+                    ],
+                    'example': (
+                        "# Set server-side (not via document.cookie):\n"
+                        "         Set-Cookie: session=abc; Path=/; Secure; HttpOnly; SameSite=Lax"
+                    )
+                }
+            },
+            'INSECURE_DEPENDENCY': {
+                'default': {
+                    'title': 'Replace HTTP Resources with HTTPS',
+                    'steps': [
+                        "Change all http:// resource URLs to https://",
+                        "Mixed content (HTTP resource on HTTPS page) can be blocked by browsers",
+                        "Use a CSP upgrade-insecure-requests directive as a safety net",
+                    ],
+                    'example': (
+                        "<!-- VULNERABLE: -->\n"
+                        "         <script src=\"http://cdn.example.com/lib.js\"></script>\n\n"
+                        "         <!-- SAFE: -->\n"
+                        "         <script src=\"https://cdn.example.com/lib.js\"></script>"
+                    )
+                }
+            },
+        }
+
+        recommendations = []
+        seen_titles = set()
+
+        for vuln in vulnerabilities:
+            vuln_type = vuln.get('type', '')
+            vuln_name = vuln.get('name', '')
+            url = vuln.get('url', '—')
+
+            type_map = REMEDIATION_MAP.get(vuln_type, {})
+
+            # Try exact name match first, then prefix match, then default
+            entry = type_map.get(vuln_name)
+            if not entry:
+                for key, val in type_map.items():
+                    if key != 'default' and (key in vuln_name or vuln_name.startswith(key)):
+                        entry = val
+                        break
+            if not entry:
+                entry = type_map.get('default')
+
+            if entry:
+                title = entry['title']
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                recommendations.append({
+                    'title': title,
+                    'vuln_type': vuln_type,
+                    'url': url,
+                    'steps': entry['steps'],
+                    'example': entry['example'],
+                })
+            else:
+                # Generic fallback for unmapped types
+                title = f"Fix: {vuln_type} — {vuln_name}"
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    recommendations.append({
+                        'title': title,
+                        'vuln_type': vuln_type,
+                        'url': url,
+                        'steps': [
+                            f"Review: {vuln.get('description', 'No description available')}",
+                            "Validate and sanitize all user-supplied input before use",
+                        ],
+                        'example': None,
+                    })
+
+        return recommendations
 
     def print_summary(self, report):
         """Print scan summary to console."""
@@ -625,6 +1177,7 @@ class HTMLCrawler:
         print(f"\nBy Type:")
         print(f"  - XSS: {report['summary']['xss_count']}")
         print(f"  - CSRF: {report['summary']['csrf_count']}")
+        print(f"  - SQLI: {report['summary']['sqli_count']}")
 
         print("\n" + "=" * 60)
         print("OTHER FINDINGS (Third-Party & Configuration)")
@@ -660,6 +1213,35 @@ class HTMLCrawler:
                 print(f"  Line: {vuln['line']}")
                 print(f"  Description: {vuln['description']}")
                 print(f"  Code: {vuln['code_snippet'][:80]}...")
+
+        # Specific remediation recommendations based on actual findings
+        recommendations = self.get_specific_recommendations(self.all_vulnerabilities)
+
+        print("\n" + "="*60)
+        print("REMEDIATION RECOMMENDATIONS")
+        print("="*60)
+
+        if not recommendations:
+            print("\n✅ No vulnerabilities detected — no remediation required.")
+            print("\nKeep these controls in place:")
+            print("  • Server-side validation for all inputs")
+            print("  • Output encoding for all user-controlled data")
+            print("  • CSRF tokens + SameSite cookies on all state-changing forms")
+            print("  • Safe DOM APIs (textContent) instead of innerHTML")
+            print("  • Security headers (CSP, HSTS, X-Frame-Options, XCTO)")
+        else:
+            print(f"\n  {len(recommendations)} specific fix(es) required based on findings above\n")
+            for idx, rec in enumerate(recommendations, 1):
+                print(f"  [{idx}] {rec['title']}  [{rec['vuln_type']}]")
+                print(f"       Detected on: {rec['url']}")
+                print(f"       Steps:")
+                for step_num, step in enumerate(rec['steps'], 1):
+                    print(f"         {step_num}. {step}")
+                if rec['example']:
+                    print(f"       Example:")
+                    for line in rec['example'].splitlines():
+                        print(f"         {line}")
+                print()
 
 
 def main():

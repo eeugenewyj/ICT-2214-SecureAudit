@@ -185,4 +185,28 @@
     "Dockerfile",
     "docker-compose.yml"
   ]
+  ,
+  "sqli_param_hints": [
+    "id","ids","user","username","email",
+    "q","query","search","keyword",
+    "filter","category","type",
+    "sort","order","orderby","dir",
+    "page","limit","offset"
+  ],
+  "sqli_action_hints": [
+    "/search","/login","/auth","/signin",
+    "/product","/products","/items","/users",
+    "/api","/list","/filter"
+  ],
+  "sqli_error_signatures": [
+    "SQL syntax.*MySQL",
+    "Warning:\\\\s+mysqli_",
+    "mysql_fetch",
+    "SQLite error",
+    "sqlite3\\\\.OperationalError",
+    "near \\\\\\\"SELECT\\\\\\\"",
+    "syntax error at or near",
+    "PG::SyntaxError|PostgreSQL.*ERROR",
+    "ORA-\\\\d{5}"
+  ]
 }

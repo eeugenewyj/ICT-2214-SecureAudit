@@ -830,6 +830,29 @@ class HTMLCrawler:
         if not shown:
             print("No third-party or configuration issues detected.")
 
+        print("\n" + "=" * 60)
+        print("OTHER FINDINGS (Third-Party & Configuration)")
+        print("=" * 60)
+
+        shown = False
+
+        for v in self.all_vulnerabilities:
+            if v['type'] in [
+                'THIRD_PARTY_LIBRARY',
+                'EXTERNAL_SERVICE',
+                'INSECURE_DEPENDENCY',
+                'SECURITY_HEADER',
+                'COOKIE_SECURITY'
+            ]:
+                shown = True
+                print(f"\n[{v['type']}] {v['severity']}")
+                print(f"  Description: {v['description']}")
+                print(f"  URL: {v['url']}")
+                print(f"  Evidence: {v['code_snippet']}")
+
+        if not shown:
+            print("No third-party or configuration issues detected.")
+
         if self.all_vulnerabilities:
             print("\n" + "-"*60)
             print("VULNERABILITY DETAILS")

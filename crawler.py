@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 HTMLCrawler - Web Security Scanner
-Component #1: URL enumeration, directory traversal, and XSS/CSRF vulnerability detection
+Component #1: URL enumeration, directory traversal, and XSS/CSRF/SQLi vulnerability detection
 
 This script crawls a target web server, discovers directories and pages,
-then performs static code analysis to identify XSS and CSRF vulnerabilities.
+then performs static code analysis to identify XSS, CSRF, and SQLi vulnerabilities.
 """
 
 import requests
@@ -27,7 +27,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class VulnerabilityScanner:
-    """Static code analyzer for XSS and CSRF vulnerabilities with dynamic pattern loading."""
+    """Static code analyzer for XSS, CSRF, and SQLi vulnerabilities with dynamic pattern loading."""
 
     def __init__(self, patterns_file=None):
         """
@@ -72,7 +72,7 @@ class VulnerabilityScanner:
         Add a new vulnerability pattern dynamically.
         
         Args:
-            vuln_type: 'xss' or 'csrf'
+            vuln_type: 'xss', 'csrf', or 'sqli'
             name: Unique identifier for the pattern
             pattern_data: Dict with 'pattern', 'severity', 'description', optional 'flags'
         """
@@ -80,6 +80,8 @@ class VulnerabilityScanner:
             self.xss_patterns[name] = pattern_data
         elif vuln_type.lower() == 'csrf':
             self.csrf_patterns[name] = pattern_data
+        elif vuln_type.lower() == 'sqli':
+            self.sqli_patterns[name] = pattern_data
         else:
             raise ValueError(f"Unknown vulnerability type: {vuln_type}")
         
@@ -93,6 +95,9 @@ class VulnerabilityScanner:
         elif vuln_type.lower() == 'csrf' and name in self.csrf_patterns:
             del self.csrf_patterns[name]
             print(f"[+] Removed CSRF pattern: {name}")
+        elif vuln_type.lower() == 'sqli' and name in self.sqli_patterns:
+            del self.sqli_patterns[name]
+            print(f"[+] Removed SQLI pattern: {name}")
         else:
             print(f"[!] Pattern not found: {name}")
 
@@ -104,6 +109,9 @@ class VulnerabilityScanner:
         elif vuln_type.lower() == 'csrf' and name in self.csrf_patterns:
             self.csrf_patterns[name].update(pattern_data)
             print(f"[+] Updated CSRF pattern: {name}")
+        elif vuln_type.lower() == 'sqli' and name in self.sqli_patterns:
+            self.sqli_patterns[name].update(pattern_data)
+            print(f"[+] Updated SQLI pattern: {name}")
         else:
             print(f"[!] Pattern not found: {name}")
 
@@ -116,12 +124,17 @@ class VulnerabilityScanner:
         print("\n=== CSRF PATTERNS ===")
         for name, info in self.csrf_patterns.items():
             print(f"  - {name}: {info['severity']} - {info['description']}")
+        
+        print("\n=== SQLI PATTERNS ===")
+        for name, info in self.sqli_patterns.items():
+            print(f"  - {name}: {info['severity']} - {info['description']}")
 
     def export_patterns(self, filepath):
         """Export current patterns to JSON file."""
         data = {
             'xss_patterns': self.xss_patterns,
-            'csrf_patterns': self.csrf_patterns
+            'csrf_patterns': self.csrf_patterns,
+            'sqli_patterns': self.sqli_patterns
         }
         
         with open(filepath, 'w') as f:
@@ -1246,7 +1259,7 @@ class HTMLCrawler:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='HTMLCrawler - Web Security Scanner for XSS and CSRF vulnerabilities'
+        description='HTMLCrawler - Web Security Scanner for XSS, CSRF, and SQLi vulnerabilities'
     )
     parser.add_argument(
         'target',
@@ -1353,7 +1366,7 @@ def main():
     print("""
     ╔═══════════════════════════════════════════════════════════╗
     ║           HTMLCrawler - Web Security Scanner              ║
-    ║         XSS & CSRF Vulnerability Detection Tool           ║
+    ║      XSS, CSRF & SQLi Vulnerability Detection Tool        ║
     ║              Dynamic Pattern Loading System               ║
     ╚═══════════════════════════════════════════════════════════╝
     """)

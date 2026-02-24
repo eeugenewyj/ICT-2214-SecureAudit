@@ -37,7 +37,7 @@ def load_dataset(dataset_path):
     with open(dataset_path, 'r') as f:
         dataset = json.load(f)
     
-    print(f"✅ Loaded dataset:")
+    print(f"Loaded dataset:")
     print(f"   Train samples: {len(dataset['train'])}")
     print(f"   Test samples: {len(dataset['test'])}")
     
@@ -66,7 +66,7 @@ def extract_features_from_samples(samples, extractor):
     X = np.array(X)
     y = np.array(y)
     
-    print(f"✅ Feature extraction complete")
+    print(f"   Feature extraction complete")
     print(f"   Feature shape: {X.shape}")
     print(f"   Labels shape: {y.shape}")
     
@@ -93,7 +93,7 @@ def train_model(X_train, y_train):
     # Train model
     model.fit(X_train, y_train)
     
-    print("✅ Model training complete")
+    print("  Model training complete")
     
     return model
 
@@ -171,7 +171,7 @@ def save_model(model, scaler, metrics, output_path, feature_names):
         pickle.dump(model_package, f)
     
     file_size = os.path.getsize(output_path)
-    print(f"✅ Model saved successfully")
+    print(f"    Model saved successfully")
     print(f"   File: {output_path}")
     print(f"   Size: {file_size / 1024:.2f} KB")
     print(f"   Features: {len(feature_names)}")
@@ -227,7 +227,7 @@ def main():
     print("\nInitializing feature extractor...")
     extractor = PHPFeatureExtractor()
     feature_names = extractor.get_feature_names()
-    print(f"✅ Feature extractor ready")
+    print(f"    Feature extractor ready")
     print(f"   Total features: {len(feature_names)}")
     
     # Step 3: Extract features from training data
@@ -247,7 +247,7 @@ def main():
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-    print("✅ Feature scaling complete")
+    print("    Feature scaling complete")
     
     # Step 6: Train model
     model = train_model(X_train_scaled, y_train)

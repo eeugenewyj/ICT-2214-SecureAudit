@@ -347,6 +347,19 @@ if (in_array($cmd, $allowed_commands)) {
     // Execute safe predefined commands
 }
 ?>""",
+        # Add decoy patterns, safe code that LOOKS dangerous
+            """<?php
+$id = $_GET['id'];  // has $_GET but is safe
+$id = intval($id);
+$stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+$stmt->execute([$id]);
+?>""",
+        # Vulnerable-looking variable names but safe logic
+        """<?php
+$sql_query = "SELECT * FROM users WHERE id = ?";
+$stmt = $pdo->prepare($sql_query);
+$stmt->execute([$safe_id]);
+?>""",
         ]
         return random.choice(templates)
     
